@@ -41,35 +41,51 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
                     })
                     .collect();
                 input.push(InputItem::Message {
+                    id: None,
                     role: Role::User,
                     content,
                 });
             }
             Message::Assistant { parts } => {
-                // For the Responses API, assistant text uses "output_text"
-                // content type (not "input_text"), and tool calls / reasoning
-                // become separate input items.
-                let text_content: Vec<InputContent> = parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        AssistantPart::Text(t) => Some(InputContent::OutputText {
-                            text: t.text.clone(),
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                if !text_content.is_empty() {
-                    input.push(InputItem::Message {
-                        role: Role::Assistant,
-                        content: text_content,
-                    });
-                }
-                // Emit reasoning and tool calls as separate input items.
-                // Order matters: reasoning must precede the function_call
-                // items it produced.
+                // The Responses API requires output items in their original
+                // order. Reasoning must precede its associated content
+                // (function_call or message). We walk the parts in arrival
+                // order, batching consecutive Text parts into a single
+                // assistant Message item and emitting Reasoning / ToolCall
+                // as separate items.
+                let mut text_buf: Vec<InputContent> = Vec::new();
+                // Track the message item ID from the first TextPart that has one.
+                let mut text_item_id: Option<String> = None;
+
+                // Helper closure: flush accumulated text parts into an
+                // assistant message input item.
+                let flush_text = |buf: &mut Vec<InputContent>,
+                                  id: &mut Option<String>,
+                                  out: &mut Vec<InputItem>| {
+                    if !buf.is_empty() {
+                        out.push(InputItem::Message {
+                            id: id.take(),
+                            role: Role::Assistant,
+                            content: std::mem::take(buf),
+                        });
+                    }
+                };
+
                 for part in parts {
                     match part {
+                        AssistantPart::Text(t) => {
+                            // Capture the message item ID if we haven't yet.
+                            if text_item_id.is_none() {
+                                text_item_id = t.metadata.get("openai:item_id").cloned();
+                            }
+                            text_buf.push(InputContent::OutputText {
+                                text: t.text.clone(),
+                            });
+                        }
                         AssistantPart::Reasoning(r) => {
+                            // Flush any preceding text before the reasoning item.
+                            flush_text(&mut text_buf, &mut text_item_id, &mut input);
+
                             let item_id = r
                                 .metadata
                                 .get("openai:item_id")
@@ -89,6 +105,9 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
                             });
                         }
                         AssistantPart::ToolCall(tc) => {
+                            // Flush any preceding text before the tool call item.
+                            flush_text(&mut text_buf, &mut text_item_id, &mut input);
+
                             let item_id = tc
                                 .metadata
                                 .get("openai:item_id")
@@ -101,9 +120,11 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
                                 arguments: tc.arguments.clone(),
                             });
                         }
-                        AssistantPart::Text(_) => {} // handled above
                     }
                 }
+
+                // Flush any trailing text.
+                flush_text(&mut text_buf, &mut text_item_id, &mut input);
             }
             Message::Tool { parts } => {
                 for part in parts {

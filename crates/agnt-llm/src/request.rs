@@ -157,6 +157,9 @@ impl From<RequestBuilder> for GenerateRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextPart {
     pub text: String,
+    /// Provider-specific metadata. Keys are namespaced (e.g. `"openai:item_id"`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,19 +234,28 @@ pub enum Message {
 impl Message {
     pub fn system(text: impl Into<String>) -> Self {
         Message::System {
-            parts: vec![SystemPart::Text(TextPart { text: text.into() })],
+            parts: vec![SystemPart::Text(TextPart {
+                text: text.into(),
+                metadata: HashMap::new(),
+            })],
         }
     }
 
     pub fn user(text: impl Into<String>) -> Self {
         Message::User {
-            parts: vec![UserPart::Text(TextPart { text: text.into() })],
+            parts: vec![UserPart::Text(TextPart {
+                text: text.into(),
+                metadata: HashMap::new(),
+            })],
         }
     }
 
     pub fn assistant(text: impl Into<String>) -> Self {
         Message::Assistant {
-            parts: vec![AssistantPart::Text(TextPart { text: text.into() })],
+            parts: vec![AssistantPart::Text(TextPart {
+                text: text.into(),
+                metadata: HashMap::new(),
+            })],
         }
     }
 

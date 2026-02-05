@@ -72,6 +72,8 @@ struct EventMapper {
     has_tool_calls: bool,
     /// Tracks the current reasoning item ID (set on output_item.added).
     current_reasoning_id: Option<String>,
+    /// Tracks the current message item ID (set on output_item.added).
+    current_message_id: Option<String>,
 }
 
 impl EventMapper {
@@ -81,6 +83,7 @@ impl EventMapper {
             id_to_index: std::collections::HashMap::new(),
             has_tool_calls: false,
             current_reasoning_id: None,
+            current_message_id: None,
         }
     }
 
@@ -96,6 +99,10 @@ impl EventMapper {
                 match parsed.item {
                     OutputItem::Reasoning { id } => {
                         self.current_reasoning_id = Some(id);
+                        Ok(None)
+                    }
+                    OutputItem::Message { id } => {
+                        self.current_message_id = Some(id);
                         Ok(None)
                     }
                     OutputItem::FunctionCall { id, name, call_id } => {
@@ -148,6 +155,12 @@ impl EventMapper {
                             text,
                             metadata,
                         })))
+                    }
+                    OutputItemComplete::Message { id, .. } => {
+                        self.current_message_id = None;
+                        let mut metadata = std::collections::HashMap::new();
+                        metadata.insert("openai:item_id".to_string(), id);
+                        Ok(Some(StreamEvent::TextDone { metadata }))
                     }
                     OutputItemComplete::FunctionCall {
                         id,

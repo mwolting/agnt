@@ -1,11 +1,16 @@
 use crate::request::{ReasoningPart, ToolCallPart};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// An event emitted during streaming generation.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     /// A chunk of text output.
     TextDelta(String),
+
+    /// A text (message) output item is complete. Carries provider-specific
+    /// metadata such as the message item ID needed for roundtripping.
+    TextDone { metadata: HashMap<String, String> },
 
     /// A new tool call started.
     ToolCallBegin {

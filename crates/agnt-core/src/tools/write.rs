@@ -1,9 +1,10 @@
 use agnt_llm::{Describe, Property, Schema};
 use serde::Deserialize;
 
-use crate::tool::Tool;
+use crate::event::{ToolCallDisplay, ToolResultDisplay};
+use crate::tool::{Tool, ToolOutput};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct WriteInput {
     /// The file path to write, relative to the working directory.
     pub path: String,
@@ -41,6 +42,18 @@ impl Describe for WriteInput {
     }
 }
 
+/// Structured output from writing a file.
+pub struct WriteOutput {
+    pub path: String,
+    pub bytes: usize,
+}
+
+impl ToolOutput for WriteOutput {
+    fn to_llm(&self) -> String {
+        format!("wrote {} bytes to {}", self.bytes, self.path)
+    }
+}
+
 /// Tool that writes (or overwrites) a file on disk.
 #[derive(Clone)]
 pub struct WriteTool {
@@ -49,6 +62,7 @@ pub struct WriteTool {
 
 impl Tool for WriteTool {
     type Input = WriteInput;
+    type Output = WriteOutput;
 
     fn name(&self) -> &str {
         "write"
@@ -58,7 +72,7 @@ impl Tool for WriteTool {
         "Write content to a file. Creates the file if it doesn't exist, or replaces its content if it does. Creates parent directories as needed."
     }
 
-    async fn call(&self, input: WriteInput) -> Result<String, agnt_llm::Error> {
+    async fn call(&self, input: WriteInput) -> Result<WriteOutput, agnt_llm::Error> {
         let path = self.cwd.join(&input.path);
 
         // Create parent directories if they don't exist.
@@ -68,10 +82,29 @@ impl Tool for WriteTool {
                 .map_err(|e| agnt_llm::Error::Other(format!("{}: {e}", parent.display())))?;
         }
 
+        let bytes = input.content.len();
         tokio::fs::write(&path, &input.content)
             .await
             .map_err(|e| agnt_llm::Error::Other(format!("{}: {e}", path.display())))?;
 
-        Ok(format!("wrote {} bytes to {}", input.content.len(), input.path))
+        Ok(WriteOutput {
+            path: input.path,
+            bytes,
+        })
+    }
+
+    fn render_input(&self, input: &WriteInput) -> ToolCallDisplay {
+        let lines = input.content.lines().count();
+        ToolCallDisplay {
+            title: format!("Write {} ({lines} lines)", input.path),
+            body: None,
+        }
+    }
+
+    fn render_output(&self, _input: &WriteInput, output: &WriteOutput) -> ToolResultDisplay {
+        ToolResultDisplay {
+            title: format!("Wrote {} bytes to {}", output.bytes, output.path),
+            body: None,
+        }
     }
 }

@@ -46,6 +46,8 @@ pub struct ReasoningConfig {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputItem {
     Message {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         role: Role,
         content: Vec<InputContent>,
     },
@@ -152,7 +154,6 @@ pub struct OutputItemAdded {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputItem {
     Message {
-        #[allow(dead_code)]
         id: String,
     },
     Reasoning {
@@ -188,7 +189,6 @@ pub struct OutputItemDone {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputItemComplete {
     Message {
-        #[allow(dead_code)]
         id: String,
     },
     Reasoning {

@@ -172,12 +172,17 @@ async fn generation_loop(
         let mut tool_calls: Vec<agnt_llm::ToolCallPart> = Vec::new();
         let mut finish_reason = FinishReason::Stop;
 
-        // Helper: flush accumulated text deltas into a Text part.
+        // Helper: flush accumulated text deltas into a Text part with
+        // optional metadata (e.g. the message item ID for roundtripping).
         macro_rules! flush_text {
             ($parts:expr, $text:expr) => {
+                flush_text!($parts, $text, std::collections::HashMap::new())
+            };
+            ($parts:expr, $text:expr, $meta:expr) => {
                 if !$text.is_empty() {
                     $parts.push(agnt_llm::AssistantPart::Text(agnt_llm::TextPart {
                         text: std::mem::take(&mut $text),
+                        metadata: $meta,
                     }));
                 }
             };
@@ -197,54 +202,29 @@ async fn generation_loop(
                         return;
                     }
                 }
+                Ok(StreamEvent::TextDone { metadata }) => {
+                    // The text message item is complete. Flush accumulated
+                    // text into a TextPart carrying the metadata (includes
+                    // the message item ID needed for roundtripping).
+                    flush_text!(parts, text, metadata);
+                }
                 Ok(StreamEvent::ReasoningDelta(_)) => {
-                    // Could forward to UI. For now, silently wait for
-                    // ReasoningDone which carries the full part.
+                    // Could forward to UI in the future. For now, silently
+                    // wait for ReasoningDone which carries the full part.
                 }
                 Ok(StreamEvent::ReasoningDone(part)) => {
                     flush_text!(parts, text);
                     parts.push(agnt_llm::AssistantPart::Reasoning(part));
                 }
-                Ok(StreamEvent::ToolCallBegin { id, name, .. }) => {
-                    if tx
-                        .send(AgentEvent::ToolCallBegin {
-                            id: id.clone(),
-                            name: name.clone(),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                Ok(StreamEvent::ToolCallBegin { .. }) => {
+                    // Wire-level detail; we emit ToolCallStart after we have
+                    // the complete call in ToolCallEnd.
                 }
-                Ok(StreamEvent::ToolCallDelta {
-                    arguments_delta, ..
-                }) => {
-                    // We don't track index→id mapping here; the full call
-                    // comes in ToolCallEnd. Just forward the delta.
-                    if tx
-                        .send(AgentEvent::ToolCallDelta {
-                            id: String::new(),
-                            delta: arguments_delta,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                Ok(StreamEvent::ToolCallDelta { .. }) => {
+                    // Wire-level streaming of arguments; ignored — we wait
+                    // for the complete call.
                 }
                 Ok(StreamEvent::ToolCallEnd { call, .. }) => {
-                    if tx
-                        .send(AgentEvent::ToolCallReady {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone(),
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
                     flush_text!(parts, text);
                     tool_calls.push(call.clone());
                     parts.push(agnt_llm::AssistantPart::ToolCall(call));
@@ -280,25 +260,6 @@ async fn generation_loop(
         // Flush any trailing text
         flush_text!(parts, text);
 
-        // Notify UI of completed assistant text (concatenate all Text parts)
-        let full_text: String = parts
-            .iter()
-            .filter_map(|p| match p {
-                agnt_llm::AssistantPart::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect();
-        if !full_text.is_empty()
-            && tx
-                .send(AgentEvent::AssistantMessage {
-                    content: full_text,
-                })
-                .await
-                .is_err()
-        {
-            return;
-        }
-
         // Record the assistant message with parts in arrival order
         {
             let mut s = state.lock().unwrap();
@@ -317,49 +278,110 @@ async fn generation_loop(
             return;
         }
 
-        // Execute tool calls and add results to history
+        // Execute tool calls: prepare → emit ToolCallStart → await → emit ToolCallDone
         for tc in &tool_calls {
-            // Get a 'static future while holding the lock, then drop the
-            // lock and await.
-            let fut = {
+            // Prepare the tool call (parse args, render input) while holding
+            // the lock, then drop the lock before awaiting.
+            let prepared = {
                 let s = state.lock().unwrap();
                 let tool = s.tools.iter().find(|t| t.definition().name == tc.name);
                 match tool {
-                    Some(t) => t.call_erased(&tc.arguments),
-                    None => Box::pin(async move {
-                        Err(agnt_llm::Error::Other(format!(
-                            "unknown tool: {}",
-                            tc.name
-                        )))
-                    }) as std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, agnt_llm::Error>> + Send>>,
+                    Some(t) => t.prepare(&tc.arguments),
+                    None => Err(agnt_llm::Error::Other(format!(
+                        "unknown tool: {}",
+                        tc.name
+                    ))),
                 }
                 // lock drops here
             };
 
-            let result = fut.await;
+            match prepared {
+                Ok(prepared) => {
+                    // Emit the input display immediately.
+                    if tx
+                        .send(AgentEvent::ToolCallStart {
+                            id: tc.id.clone(),
+                            display: prepared.input_display,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
 
-            let result_text = match result {
-                Ok(text) => text,
-                Err(e) => format!("tool error: {e}"),
-            };
+                    // Execute the tool.
+                    match prepared.future.await {
+                        Ok(result) => {
+                            // Emit the output display.
+                            if tx
+                                .send(AgentEvent::ToolCallDone {
+                                    id: tc.id.clone(),
+                                    display: result.output_display,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
 
-            if tx
-                .send(AgentEvent::ToolResult {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    result: result_text.clone(),
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
+                            // Add LLM-formatted result to conversation history.
+                            {
+                                let mut s = state.lock().unwrap();
+                                s.messages
+                                    .push(Message::tool_result(&tc.id, &result.llm_output));
+                            }
+                        }
+                        Err(e) => {
+                            let error_text = format!("tool error: {e}");
 
-            // Add tool result to conversation
-            {
-                let mut s = state.lock().unwrap();
-                s.messages
-                    .push(Message::tool_result(&tc.id, &result_text));
+                            if tx
+                                .send(AgentEvent::ToolCallDone {
+                                    id: tc.id.clone(),
+                                    display: crate::event::ToolResultDisplay {
+                                        title: "error".to_string(),
+                                        body: Some(crate::event::DisplayBody::Text(
+                                            error_text.clone(),
+                                        )),
+                                    },
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+
+                            // Errors also go into conversation history so the
+                            // model can see what went wrong.
+                            {
+                                let mut s = state.lock().unwrap();
+                                s.messages.push(Message::tool_result(&tc.id, &error_text));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Parsing / preparation failed.
+                    let error_text = format!("tool error: {e}");
+
+                    if tx
+                        .send(AgentEvent::ToolCallDone {
+                            id: tc.id.clone(),
+                            display: crate::event::ToolResultDisplay {
+                                title: "error".to_string(),
+                                body: Some(crate::event::DisplayBody::Text(error_text.clone())),
+                            },
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.messages.push(Message::tool_result(&tc.id, &error_text));
+                    }
+                }
             }
         }
 

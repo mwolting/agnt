@@ -1,9 +1,10 @@
 use agnt_llm::{Describe, Property, Schema};
 use serde::Deserialize;
 
-use crate::tool::Tool;
+use crate::event::{ToolCallDisplay, ToolResultDisplay};
+use crate::tool::{Tool, ToolOutput};
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct EditInput {
     /// The file path to edit, relative to the working directory.
     pub path: String,
@@ -49,6 +50,17 @@ impl Describe for EditInput {
     }
 }
 
+/// Structured output from editing a file.
+pub struct EditOutput {
+    pub path: String,
+}
+
+impl ToolOutput for EditOutput {
+    fn to_llm(&self) -> String {
+        format!("edited {}", self.path)
+    }
+}
+
 /// Tool that performs an exact-match find-and-replace in a file.
 /// The `old` string must appear exactly once in the file.
 #[derive(Clone)]
@@ -58,6 +70,7 @@ pub struct EditTool {
 
 impl Tool for EditTool {
     type Input = EditInput;
+    type Output = EditOutput;
 
     fn name(&self) -> &str {
         "edit"
@@ -67,7 +80,7 @@ impl Tool for EditTool {
         "Edit a file by replacing an exact match of `old` with `new`. The `old` string must appear exactly once in the file."
     }
 
-    async fn call(&self, input: EditInput) -> Result<String, agnt_llm::Error> {
+    async fn call(&self, input: EditInput) -> Result<EditOutput, agnt_llm::Error> {
         let path = self.cwd.join(&input.path);
 
         let content = tokio::fs::read_to_string(&path)
@@ -93,6 +106,20 @@ impl Tool for EditTool {
             .await
             .map_err(|e| agnt_llm::Error::Other(format!("{}: {e}", path.display())))?;
 
-        Ok(format!("edited {}", input.path))
+        Ok(EditOutput { path: input.path })
+    }
+
+    fn render_input(&self, input: &EditInput) -> ToolCallDisplay {
+        ToolCallDisplay {
+            title: format!("Edit {}", input.path),
+            body: None,
+        }
+    }
+
+    fn render_output(&self, _input: &EditInput, output: &EditOutput) -> ToolResultDisplay {
+        ToolResultDisplay {
+            title: format!("Edited {}", output.path),
+            body: None,
+        }
     }
 }

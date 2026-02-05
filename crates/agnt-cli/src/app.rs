@@ -186,16 +186,13 @@ impl App {
                 self.current_response.push_str(&delta);
                 self.cursor_blink_on = true; // reset blink on new content
             }
-            AgentEvent::AssistantMessage { .. } => {
-                // We already accumulated via TextDelta; finalize below on TurnComplete
-            }
-            AgentEvent::ToolCallBegin { name, .. } => {
+            AgentEvent::ToolCallStart { display, .. } => {
                 self.current_response
-                    .push_str(&format!("\n[calling tool: {name}...]\n"));
+                    .push_str(&format!("\n[{}...]\n", display.title));
             }
-            AgentEvent::ToolResult { name, result, .. } => {
+            AgentEvent::ToolCallDone { display, .. } => {
                 self.current_response
-                    .push_str(&format!("[{name} returned: {}]\n", truncate(&result, 200)));
+                    .push_str(&format!("[{}]\n", display.title));
             }
             AgentEvent::TurnComplete { .. } => {
                 self.finalize_response();
@@ -207,7 +204,6 @@ impl App {
                 self.finalize_response();
                 self.state = AppState::Idle;
             }
-            _ => {}
         }
     }
 
@@ -235,13 +231,5 @@ impl App {
     fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
-    }
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
     }
 }
