@@ -14,7 +14,19 @@ pub enum Role {
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub role: Role,
-    pub content: String,
+    pub chunks: Vec<StreamChunk>,
+}
+
+/// A typed chunk in the streaming assistant response, preserving
+/// the natural ordering of reasoning, text, and tool calls.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    /// Model reasoning/thinking text (rendered dimmed/italic).
+    Reasoning(String),
+    /// Regular assistant text.
+    Text(String),
+    /// Tool call status line (e.g. "[Read src/main.rs...]" or "[Read src/main.rs]").
+    Tool(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -33,8 +45,8 @@ pub struct App {
     pub cursor_pos: usize,
     pub scroll_offset: u16,
     pub state: AppState,
-    /// Accumulates streaming text for the current assistant response.
-    pub current_response: String,
+    /// Streaming assistant response as an ordered list of typed chunks.
+    pub stream_chunks: Vec<StreamChunk>,
     pub should_quit: bool,
     /// Toggled by a timer to blink the streaming cursor.
     pub cursor_blink_on: bool,
@@ -51,7 +63,7 @@ impl App {
             cursor_pos: 0,
             scroll_offset: 0,
             state: AppState::Idle,
-            current_response: String::new(),
+            stream_chunks: Vec::new(),
             should_quit: false,
             cursor_blink_on: true,
             max_scroll: 0,
@@ -179,28 +191,42 @@ impl App {
                 self.cursor_pos = 0;
                 self.messages.push(DisplayMessage {
                     role: Role::User,
-                    content,
+                    chunks: vec![StreamChunk::Text(content)],
                 });
             }
             AgentEvent::TextDelta { delta } => {
-                self.current_response.push_str(&delta);
-                self.cursor_blink_on = true; // reset blink on new content
+                // Append to the last Text chunk, or start a new one.
+                if let Some(StreamChunk::Text(s)) = self.stream_chunks.last_mut() {
+                    s.push_str(&delta);
+                } else {
+                    self.stream_chunks.push(StreamChunk::Text(delta));
+                }
+                self.cursor_blink_on = true;
+            }
+            AgentEvent::ReasoningDelta { delta } => {
+                // Append to the last Reasoning chunk, or start a new one.
+                if let Some(StreamChunk::Reasoning(s)) = self.stream_chunks.last_mut() {
+                    s.push_str(&delta);
+                } else {
+                    self.stream_chunks.push(StreamChunk::Reasoning(delta));
+                }
+                self.cursor_blink_on = true;
             }
             AgentEvent::ToolCallStart { display, .. } => {
-                self.current_response
-                    .push_str(&format!("\n[{}...]\n", display.title));
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[{}...]", display.title)));
             }
             AgentEvent::ToolCallDone { display, .. } => {
-                self.current_response
-                    .push_str(&format!("[{}]\n", display.title));
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[{}]", display.title)));
             }
             AgentEvent::TurnComplete { .. } => {
                 self.finalize_response();
                 self.state = AppState::Idle;
             }
             AgentEvent::Error { error } => {
-                self.current_response
-                    .push_str(&format!("\n[error: {error}]"));
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[error: {error}]")));
                 self.finalize_response();
                 self.state = AppState::Idle;
             }
@@ -209,17 +235,18 @@ impl App {
 
     fn submit(&mut self) {
         let text = self.input.trim().to_string();
-        self.current_response.clear();
+        self.stream_chunks.clear();
         // Input stays visible until UserMessage event confirms it's in history
         let stream = self.agent.submit(&text);
         self.state = AppState::Generating { stream };
     }
 
     fn finalize_response(&mut self) {
-        if !self.current_response.is_empty() {
+        let chunks = std::mem::take(&mut self.stream_chunks);
+        if !chunks.is_empty() {
             self.messages.push(DisplayMessage {
                 role: Role::Assistant,
-                content: std::mem::take(&mut self.current_response),
+                chunks,
             });
         }
     }

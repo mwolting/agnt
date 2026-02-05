@@ -158,13 +158,24 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
         })),
     };
 
-    let reasoning = req
+    let reasoning_effort = req
         .metadata
         .get("reasoning_effort")
         .and_then(|v| v.as_str())
-        .map(|effort| ReasoningConfig {
-            effort: effort.to_string(),
-        });
+        .map(|s| s.to_string());
+    let reasoning_summary = req
+        .metadata
+        .get("reasoning_summary")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let reasoning = if reasoning_effort.is_some() || reasoning_summary.is_some() {
+        Some(ReasoningConfig {
+            effort: reasoning_effort,
+            summary: reasoning_summary,
+        })
+    } else {
+        None
+    };
 
     OpenAIRequest {
         model: model_id.to_string(),

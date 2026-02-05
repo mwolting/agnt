@@ -58,6 +58,9 @@ pub enum AgentEvent {
     /// A chunk of assistant text arrived.
     TextDelta { delta: String },
 
+    /// A chunk of reasoning/thinking text arrived.
+    ReasoningDelta { delta: String },
+
     /// A tool call has been fully parsed and is about to execute.
     /// Contains a rendered display of the tool's input.
     ToolCallStart {

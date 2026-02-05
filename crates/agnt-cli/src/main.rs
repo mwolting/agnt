@@ -36,7 +36,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = provider.model("gpt-5-nano");
 
     let cwd = std::env::current_dir()?;
-    let agent = agnt_core::Agent::with_defaults(model, cwd);
+    let mut agent = agnt_core::Agent::with_defaults(model, cwd);
+
+    use agnt_llm_openai::{OpenAIRequestExt, ReasoningSummary};
+    agent.configure_request(|req| {
+        req.reasoning_summary(ReasoningSummary::Detailed);
+    });
 
     let mut app = App::new(agent);
 

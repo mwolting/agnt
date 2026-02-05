@@ -85,14 +85,41 @@ impl ReasoningEffort {
     }
 }
 
+/// Reasoning summary setting for reasoning models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningSummary {
+    /// Automatically select the most detailed summary available for the model.
+    Auto,
+    /// Concise summaries (supported by some models, e.g. computer-use).
+    Concise,
+    /// Detailed summaries (supported by most reasoning models).
+    Detailed,
+}
+
+impl ReasoningSummary {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReasoningSummary::Auto => "auto",
+            ReasoningSummary::Concise => "concise",
+            ReasoningSummary::Detailed => "detailed",
+        }
+    }
+}
+
 pub trait OpenAIRequestExt {
     /// Set reasoning effort for o-series / gpt-5 models.
     fn reasoning_effort(&mut self, effort: ReasoningEffort) -> &mut Self;
+    /// Set reasoning summary mode for reasoning models.
+    fn reasoning_summary(&mut self, summary: ReasoningSummary) -> &mut Self;
 }
 
 impl OpenAIRequestExt for RequestBuilder {
     fn reasoning_effort(&mut self, effort: ReasoningEffort) -> &mut Self {
         self.meta("reasoning_effort", effort.as_str())
+    }
+
+    fn reasoning_summary(&mut self, summary: ReasoningSummary) -> &mut Self {
+        self.meta("reasoning_summary", summary.as_str())
     }
 }
 

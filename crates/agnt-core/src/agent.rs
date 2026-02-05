@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
-use agnt_llm::{LanguageModel, Message, ToolDefinition};
+use agnt_llm::{LanguageModel, Message, RequestBuilder, ToolDefinition};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
@@ -23,12 +23,18 @@ struct AgentState {
 // Agent
 // ---------------------------------------------------------------------------
 
+/// Callback invoked on every `RequestBuilder` before it is built.
+/// Use this to inject provider-specific options (e.g. reasoning effort/summary).
+type ConfigureRequest = dyn Fn(&mut RequestBuilder) + Send + Sync;
+
 /// The core agent. Holds a language model, conversation history, and
 /// registered tools. UI-agnostic — communicates via [`AgentEvent`]s.
 pub struct Agent {
     model: Arc<LanguageModel>,
     system_prompt: Option<String>,
     state: Arc<Mutex<AgentState>>,
+    /// Optional callback applied to every outgoing request.
+    configure_request: Option<Arc<ConfigureRequest>>,
 }
 
 impl Agent {
@@ -41,6 +47,7 @@ impl Agent {
                 messages: Vec::new(),
                 tools: Vec::new(),
             })),
+            configure_request: None,
         }
     }
 
@@ -63,6 +70,26 @@ impl Agent {
     /// Set the system prompt.
     pub fn system(&mut self, prompt: impl Into<String>) -> &mut Self {
         self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    /// Set a callback that configures every outgoing request.
+    ///
+    /// Use this to inject provider-specific options that should apply to
+    /// every generation call (e.g. reasoning effort, reasoning summary).
+    ///
+    /// ```ignore
+    /// use agnt_llm_openai::{OpenAIRequestExt, ReasoningSummaryMode};
+    ///
+    /// agent.configure_request(|req| {
+    ///     req.reasoning_summary(ReasoningSummaryMode::Detailed);
+    /// });
+    /// ```
+    pub fn configure_request(
+        &mut self,
+        f: impl Fn(&mut RequestBuilder) + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.configure_request = Some(Arc::new(f));
         self
     }
 
@@ -91,9 +118,10 @@ impl Agent {
         let model = Arc::clone(&self.model);
         let state = Arc::clone(&self.state);
         let system_prompt = self.system_prompt.clone();
+        let configure_request = self.configure_request.clone();
 
         tokio::spawn(async move {
-            generation_loop(model, state, system_prompt, content, tx).await;
+            generation_loop(model, state, system_prompt, configure_request, content, tx).await;
         });
 
         AgentStream { rx }
@@ -127,6 +155,7 @@ async fn generation_loop(
     model: Arc<LanguageModel>,
     state: Arc<Mutex<AgentState>>,
     system_prompt: Option<String>,
+    configure_request: Option<Arc<ConfigureRequest>>,
     content: String,
     tx: mpsc::Sender<AgentEvent>,
 ) {
@@ -160,6 +189,11 @@ async fn generation_loop(
 
             let tool_defs: Vec<ToolDefinition> = s.tools.iter().map(|t| t.definition()).collect();
             req.tools(tool_defs);
+
+            // Apply caller-provided request configuration (e.g. reasoning options).
+            if let Some(ref configure) = configure_request {
+                configure(&mut req);
+            }
 
             req.build()
         };
@@ -208,9 +242,16 @@ async fn generation_loop(
                     // the message item ID needed for roundtripping).
                     flush_text!(parts, text, metadata);
                 }
-                Ok(StreamEvent::ReasoningDelta(_)) => {
-                    // Could forward to UI in the future. For now, silently
-                    // wait for ReasoningDone which carries the full part.
+                Ok(StreamEvent::ReasoningDelta(delta)) => {
+                    if tx
+                        .send(AgentEvent::ReasoningDelta {
+                            delta: delta.clone(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
                 Ok(StreamEvent::ReasoningDone(part)) => {
                     flush_text!(parts, text);

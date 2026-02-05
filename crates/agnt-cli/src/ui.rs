@@ -4,10 +4,13 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, AppState, Role};
+use crate::app::{App, AppState, Role, StreamChunk};
 
 const USER_COLOR: Color = Color::Cyan;
 const ASSISTANT_COLOR: Color = Color::Green;
+const REASONING_STYLE: Style = Style::new()
+    .fg(Color::DarkGray)
+    .add_modifier(Modifier::ITALIC);
 const DIM: Style = Style::new().fg(Color::DarkGray);
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -95,6 +98,46 @@ fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     result
 }
 
+/// Append styled lines for a slice of [`StreamChunk`]s.
+fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Blank line between chunks, except consecutive Tool chunks
+        // (start + done belong together).
+        if i > 0 {
+            let prev_is_tool = matches!(chunks[i - 1], StreamChunk::Tool(_));
+            let curr_is_tool = matches!(chunk, StreamChunk::Tool(_));
+            if !prev_is_tool || !curr_is_tool {
+                lines.push(Line::raw(""));
+            }
+        }
+
+        match chunk {
+            StreamChunk::Reasoning(s) => {
+                for text_line in s.lines() {
+                    lines.push(Line::from(Span::styled(
+                        text_line.to_string(),
+                        REASONING_STYLE,
+                    )));
+                }
+                if s.ends_with('\n') {
+                    lines.push(Line::raw(""));
+                }
+            }
+            StreamChunk::Text(s) => {
+                for text_line in s.lines() {
+                    lines.push(Line::raw(text_line.to_string()));
+                }
+                if s.ends_with('\n') {
+                    lines.push(Line::raw(""));
+                }
+            }
+            StreamChunk::Tool(s) => {
+                lines.push(Line::from(Span::styled(s.clone(), DIM)));
+            }
+        }
+    }
+}
+
 /// Build the logical lines for the messages area, then wrap them.
 fn build_message_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let mut logical_lines: Vec<Line> = Vec::new();
@@ -114,13 +157,12 @@ fn build_message_lines(app: &App, width: usize) -> Vec<Line<'static>> {
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )));
 
-        for text_line in msg.content.lines() {
-            logical_lines.push(Line::raw(text_line.to_string()));
-        }
+        render_chunks(&msg.chunks, &mut logical_lines);
     }
 
     // Streaming / typing indicator
-    if matches!(app.state, AppState::Generating { .. }) {
+    let is_generating = matches!(app.state, AppState::Generating { .. });
+    if is_generating || !app.stream_chunks.is_empty() {
         if !logical_lines.is_empty() {
             logical_lines.push(Line::raw(""));
         }
@@ -130,37 +172,36 @@ fn build_message_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                 .fg(ASSISTANT_COLOR)
                 .add_modifier(Modifier::BOLD),
         )));
-        let cursor_char = if app.cursor_blink_on { "█" } else { " " };
-        if app.current_response.is_empty() {
-            logical_lines.push(Line::from(Span::styled(
+
+        render_chunks(&app.stream_chunks, &mut logical_lines);
+
+        // Blinking cursor (only while generating).
+        if is_generating {
+            let cursor_char = if app.cursor_blink_on { "█" } else { " " };
+            let cursor_span = Span::styled(
                 cursor_char.to_string(),
                 Style::default().fg(ASSISTANT_COLOR),
-            )));
-        } else {
-            for text_line in app.current_response.lines() {
-                logical_lines.push(Line::raw(text_line.to_string()));
+            );
+
+            if app.stream_chunks.is_empty() {
+                // Nothing yet — cursor on its own line.
+                logical_lines.push(Line::from(cursor_span));
+            } else {
+                // Check if the last chunk ended with a newline or is a Tool
+                // line — if so the cursor belongs on a fresh line.
+                let needs_new_line = match app.stream_chunks.last() {
+                    Some(StreamChunk::Tool(_)) => true,
+                    Some(StreamChunk::Text(s) | StreamChunk::Reasoning(s)) => s.ends_with('\n'),
+                    None => false,
+                };
+                if needs_new_line {
+                    logical_lines.push(Line::from(cursor_span));
+                } else if let Some(last) = logical_lines.last_mut() {
+                    let mut spans = last.spans.clone();
+                    spans.push(cursor_span);
+                    *last = Line::from(spans);
+                }
             }
-            if let Some(last) = logical_lines.last_mut() {
-                let mut spans = last.spans.clone();
-                spans.push(Span::styled(
-                    cursor_char.to_string(),
-                    Style::default().fg(ASSISTANT_COLOR),
-                ));
-                *last = Line::from(spans);
-            }
-        }
-    } else if !app.current_response.is_empty() {
-        if !logical_lines.is_empty() {
-            logical_lines.push(Line::raw(""));
-        }
-        logical_lines.push(Line::from(Span::styled(
-            "Assistant".to_string(),
-            Style::default()
-                .fg(ASSISTANT_COLOR)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for text_line in app.current_response.lines() {
-            logical_lines.push(Line::raw(text_line.to_string()));
         }
     }
 
