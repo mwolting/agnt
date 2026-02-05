@@ -8,8 +8,11 @@ name = "agnt"
 path = "src/main.rs"
 
 [dependencies]
+agnt-core = { version = "0.1.0", path = "../agnt-core" }
 agnt-llm = { path = "../agnt-llm" }
 agnt-llm-openai = { path = "../agnt-llm-openai" }
+crossterm = { version = "0.29.0", features = ["event-stream"] }
 dotenvy = "0.15.7"
+ratatui = { version = "0.30", features = ["crossterm"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"

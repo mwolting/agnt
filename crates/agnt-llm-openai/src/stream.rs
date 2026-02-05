@@ -3,11 +3,11 @@
 
 use crate::types::{
     FunctionCallArgumentsDelta, OpenAIRequest, OutputItem, OutputItemAdded, OutputItemComplete,
-    OutputItemDone, OutputTextDelta, ResponseCompleted,
+    OutputItemDone, OutputTextDelta, ReasoningSummaryTextDelta, ResponseCompleted,
 };
 use crate::ProviderState;
 use agnt_llm::error::Error;
-use agnt_llm::request::ToolCallPart;
+use agnt_llm::request::{ReasoningPart, ToolCallPart};
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
 use eventsource_stream::Eventsource;
 use futures::Stream;
@@ -70,6 +70,8 @@ struct EventMapper {
     id_to_index: std::collections::HashMap<String, usize>,
     /// Whether we saw any tool calls (to determine finish reason).
     has_tool_calls: bool,
+    /// Tracks the current reasoning item ID (set on output_item.added).
+    current_reasoning_id: Option<String>,
 }
 
 impl EventMapper {
@@ -78,6 +80,7 @@ impl EventMapper {
             tool_call_index: 0,
             id_to_index: std::collections::HashMap::new(),
             has_tool_calls: false,
+            current_reasoning_id: None,
         }
     }
 
@@ -91,6 +94,10 @@ impl EventMapper {
             "response.output_item.added" => {
                 let parsed: OutputItemAdded = serde_json::from_str(data)?;
                 match parsed.item {
+                    OutputItem::Reasoning { id } => {
+                        self.current_reasoning_id = Some(id);
+                        Ok(None)
+                    }
                     OutputItem::FunctionCall { id, name, call_id } => {
                         let index = self.tool_call_index;
                         self.tool_call_index += 1;
@@ -106,6 +113,11 @@ impl EventMapper {
                 }
             }
 
+            "response.reasoning_summary_text.delta" => {
+                let parsed: ReasoningSummaryTextDelta = serde_json::from_str(data)?;
+                Ok(Some(StreamEvent::ReasoningDelta(parsed.delta)))
+            }
+
             "response.function_call_arguments.delta" => {
                 let parsed: FunctionCallArgumentsDelta = serde_json::from_str(data)?;
                 let index = self.tool_call_index.saturating_sub(1);
@@ -118,6 +130,25 @@ impl EventMapper {
             "response.output_item.done" => {
                 let parsed: OutputItemDone = serde_json::from_str(data)?;
                 match parsed.item {
+                    OutputItemComplete::Reasoning {
+                        id,
+                        summary,
+                        encrypted_content,
+                    } => {
+                        self.current_reasoning_id = None;
+                        let text = summary.first().map(|s| match s {
+                            crate::types::ReasoningSummary::SummaryText { text } => text.clone(),
+                        });
+                        let mut metadata = std::collections::HashMap::new();
+                        metadata.insert("openai:item_id".to_string(), id);
+                        if let Some(ec) = encrypted_content {
+                            metadata.insert("openai:encrypted_content".to_string(), ec);
+                        }
+                        Ok(Some(StreamEvent::ReasoningDone(ReasoningPart {
+                            text,
+                            metadata,
+                        })))
+                    }
                     OutputItemComplete::FunctionCall {
                         id,
                         call_id,
@@ -125,12 +156,15 @@ impl EventMapper {
                         arguments,
                     } => {
                         let index = self.id_to_index.get(&id).copied().unwrap_or(0);
+                        let mut metadata = std::collections::HashMap::new();
+                        metadata.insert("openai:item_id".to_string(), id);
                         Ok(Some(StreamEvent::ToolCallEnd {
                             index,
                             call: ToolCallPart {
                                 id: call_id,
                                 name,
                                 arguments,
+                                metadata,
                             },
                         }))
                     }
@@ -157,7 +191,9 @@ impl EventMapper {
             "error" => Ok(Some(StreamEvent::Error(data.to_string()))),
 
             // Events we don't need: response.created, response.in_progress,
-            // response.output_text.done, response.content_part.added/done, etc.
+            // response.output_text.done, response.content_part.added/done,
+            // response.reasoning_summary_part.added/done,
+            // response.reasoning_summary_text.done, etc.
             _ => Ok(None),
         }
     }

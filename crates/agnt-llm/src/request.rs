@@ -9,7 +9,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
     pub messages: Vec<Message>,
-    pub tools: Vec<Tool>,
+    pub tools: Vec<ToolDefinition>,
     pub options: GenerateOptions,
     /// Provider-specific metadata. Passed through to the backend as-is.
     pub metadata: HashMap<String, serde_json::Value>,
@@ -34,7 +34,7 @@ pub struct GenerateOptions {
 #[derive(Debug, Clone, Default)]
 pub struct RequestBuilder {
     pub(crate) messages: Vec<Message>,
-    pub(crate) tools: Vec<Tool>,
+    pub(crate) tools: Vec<ToolDefinition>,
     pub(crate) options: GenerateOptions,
     pub(crate) metadata: HashMap<String, serde_json::Value>,
 }
@@ -84,12 +84,12 @@ impl RequestBuilder {
 
     // -- tools --
 
-    pub fn tool(&mut self, tool: Tool) -> &mut Self {
+    pub fn tool(&mut self, tool: ToolDefinition) -> &mut Self {
         self.tools.push(tool);
         self
     }
 
-    pub fn tools(&mut self, tools: impl IntoIterator<Item = Tool>) -> &mut Self {
+    pub fn tools(&mut self, tools: impl IntoIterator<Item = ToolDefinition>) -> &mut Self {
         self.tools.extend(tools);
         self
     }
@@ -166,9 +166,22 @@ pub struct ImagePart {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallPart {
+    /// The tool call ID used to correlate call → result (e.g. OpenAI's `call_id`).
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// Provider-specific metadata. Keys are namespaced (e.g. `"openai:item_id"`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningPart {
+    /// Optional summary text (e.g. from `reasoning.summary = "auto"`).
+    pub text: Option<String>,
+    /// Provider-specific metadata. Keys are namespaced (e.g. `"openai:item_id"`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +209,7 @@ pub enum UserPart {
 pub enum AssistantPart {
     Text(TextPart),
     ToolCall(ToolCallPart),
+    Reasoning(ReasoningPart),
 }
 
 // ---------------------------------------------------------------------------
@@ -247,9 +261,10 @@ impl Message {
 // Tools
 // ---------------------------------------------------------------------------
 
-/// A tool the model can call.
+/// A tool descriptor sent to the model. Describes the name, purpose, and
+/// parameter schema — but carries no execution logic.
 #[derive(Debug, Clone)]
-pub struct Tool {
+pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: Schema,
@@ -365,6 +380,7 @@ impl Schema {
                 let mut obj = serde_json::json!({
                     "type": "object",
                     "properties": props,
+                    "additionalProperties": false,
                 });
                 if !required.is_empty() {
                     obj["required"] = serde_json::json!(required);

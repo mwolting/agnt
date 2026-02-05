@@ -4,7 +4,9 @@ use agnt_llm::request::{
     AssistantPart, GenerateRequest, Message, SystemPart, ToolChoice, UserPart,
 };
 
-use crate::types::{InputContent, InputItem, OpenAIRequest, OpenAITool, ReasoningConfig, Role};
+use crate::types::{
+    InputContent, InputItem, OpenAIRequest, OpenAITool, ReasoningConfig, ReasoningSummary, Role,
+};
 
 pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest {
     // The Responses API takes `instructions` separately (system message).
@@ -44,16 +46,16 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
                 });
             }
             Message::Assistant { parts } => {
-                // For the Responses API, assistant text goes as a message,
-                // and tool calls become separate function_call output items
-                // that were already returned in a previous turn.
+                // For the Responses API, assistant text uses "output_text"
+                // content type (not "input_text"), and tool calls / reasoning
+                // become separate input items.
                 let text_content: Vec<InputContent> = parts
                     .iter()
                     .filter_map(|p| match p {
-                        AssistantPart::Text(t) => Some(InputContent::InputText {
+                        AssistantPart::Text(t) => Some(InputContent::OutputText {
                             text: t.text.clone(),
                         }),
-                        AssistantPart::ToolCall(_) => None,
+                        _ => None,
                     })
                     .collect();
                 if !text_content.is_empty() {
@@ -61,6 +63,46 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
                         role: Role::Assistant,
                         content: text_content,
                     });
+                }
+                // Emit reasoning and tool calls as separate input items.
+                // Order matters: reasoning must precede the function_call
+                // items it produced.
+                for part in parts {
+                    match part {
+                        AssistantPart::Reasoning(r) => {
+                            let item_id = r
+                                .metadata
+                                .get("openai:item_id")
+                                .cloned()
+                                .unwrap_or_default();
+                            let encrypted_content =
+                                r.metadata.get("openai:encrypted_content").cloned();
+                            let summary: Vec<ReasoningSummary> = r
+                                .text
+                                .iter()
+                                .map(|t| ReasoningSummary::SummaryText { text: t.clone() })
+                                .collect();
+                            input.push(InputItem::Reasoning {
+                                id: item_id,
+                                summary,
+                                encrypted_content,
+                            });
+                        }
+                        AssistantPart::ToolCall(tc) => {
+                            let item_id = tc
+                                .metadata
+                                .get("openai:item_id")
+                                .cloned()
+                                .unwrap_or_else(|| tc.id.clone());
+                            input.push(InputItem::FunctionCall {
+                                id: item_id,
+                                call_id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            });
+                        }
+                        AssistantPart::Text(_) => {} // handled above
+                    }
                 }
             }
             Message::Tool { parts } => {

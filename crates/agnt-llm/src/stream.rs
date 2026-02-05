@@ -1,4 +1,4 @@
-use crate::request::ToolCallPart;
+use crate::request::{ReasoningPart, ToolCallPart};
 use serde::{Deserialize, Serialize};
 
 /// An event emitted during streaming generation.
@@ -22,6 +22,12 @@ pub enum StreamEvent {
 
     /// A tool call is complete and ready to execute.
     ToolCallEnd { index: usize, call: ToolCallPart },
+
+    /// A chunk of reasoning summary text.
+    ReasoningDelta(String),
+
+    /// A reasoning item is complete.
+    ReasoningDone(ReasoningPart),
 
     /// Generation is complete.
     Finish {

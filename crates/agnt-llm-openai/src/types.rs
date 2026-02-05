@@ -49,10 +49,30 @@ pub enum InputItem {
         role: Role,
         content: Vec<InputContent>,
     },
+    /// A previous reasoning output item, replayed as input.
+    Reasoning {
+        id: String,
+        summary: Vec<ReasoningSummary>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+    /// A previous assistant tool call, replayed as input.
+    FunctionCall {
+        id: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
     FunctionCallOutput {
         call_id: String,
         output: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReasoningSummary {
+    SummaryText { text: String },
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
@@ -67,8 +87,16 @@ pub enum Role {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InputContent {
-    InputText { text: String },
-    InputImage { url: String },
+    InputText {
+        text: String,
+    },
+    InputImage {
+        url: String,
+    },
+    /// Used for assistant message content (previous output replayed as input).
+    OutputText {
+        text: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -127,6 +155,9 @@ pub enum OutputItem {
         #[allow(dead_code)]
         id: String,
     },
+    Reasoning {
+        id: String,
+    },
     FunctionCall {
         id: String,
         #[serde(default)]
@@ -160,6 +191,13 @@ pub enum OutputItemComplete {
         #[allow(dead_code)]
         id: String,
     },
+    Reasoning {
+        id: String,
+        #[serde(default)]
+        summary: Vec<ReasoningSummary>,
+        #[serde(default)]
+        encrypted_content: Option<String>,
+    },
     FunctionCall {
         id: String,
         call_id: String,
@@ -168,6 +206,11 @@ pub enum OutputItemComplete {
     },
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReasoningSummaryTextDelta {
+    pub delta: String,
 }
 
 #[derive(Debug, Deserialize)]
