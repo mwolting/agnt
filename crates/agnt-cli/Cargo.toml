@@ -1,0 +1,15 @@
+[package]
+name = "agnt-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "agnt"
+path = "src/main.rs"
+
+[dependencies]
+agnt-llm = { path = "../agnt-llm" }
+agnt-llm-openai = { path = "../agnt-llm-openai" }
+dotenvy = "0.15.7"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
