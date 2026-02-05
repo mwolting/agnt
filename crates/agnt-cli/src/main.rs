@@ -3,12 +3,12 @@ mod ui;
 
 use app::{App, AppState};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::execute;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io;
 use tokio_stream::StreamExt;
 
@@ -31,9 +31,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         default_hook(info);
     }));
 
-    // Set up the model and agent
-    let provider = agnt_llm_openai::from_env();
-    let model = provider.model("gpt-5-nano");
+    // Set up the registry
+    let mut registry = agnt_llm_registry::Registry::new();
+    agnt_llm_openai::register(&mut registry);
+    registry.fetch_spec().await?;
+
+    // --providers: list available providers and their models, then exit.
+    if std::env::args().any(|a| a == "--providers") {
+        for provider in registry.available_providers() {
+            println!("{} ({})", provider.id, provider.name);
+            let mut models = registry.list_models(&provider.id);
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            for model in &models {
+                let name = model.name.as_deref().unwrap_or("");
+                println!("  {:<30} {}", model.id, name);
+            }
+        }
+        return Ok(());
+    }
+
+    let model = registry.model("opencode", "gpt-5.2-codex")?;
 
     let cwd = std::env::current_dir()?;
     let mut agent = agnt_core::Agent::with_defaults(model, cwd);

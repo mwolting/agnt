@@ -3,8 +3,13 @@ name = "agnt-llm-openai"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["registry"]
+registry = ["dep:agnt-llm-registry"]
+
 [dependencies]
 agnt-llm = { path = "../agnt-llm" }
+agnt-llm-registry = { path = "../agnt-llm-registry", optional = true }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
 eventsource-stream = "0.2.3"

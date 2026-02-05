@@ -1,6 +1,11 @@
 mod convert;
+#[cfg(feature = "registry")]
+mod register;
 mod stream;
 mod types;
+
+#[cfg(feature = "registry")]
+pub use register::register;
 
 use agnt_llm::request::GenerateRequest;
 use agnt_llm::response::Response;

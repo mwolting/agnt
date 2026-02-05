@@ -11,6 +11,7 @@ path = "src/main.rs"
 agnt-core = { version = "0.1.0", path = "../agnt-core" }
 agnt-llm = { path = "../agnt-llm" }
 agnt-llm-openai = { path = "../agnt-llm-openai" }
+agnt-llm-registry = { path = "../agnt-llm-registry" }
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dotenvy = "0.15.7"
 ratatui = { version = "0.30", features = ["crossterm"] }

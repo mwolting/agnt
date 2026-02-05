@@ -9,6 +9,7 @@ dependencies = [
  "agnt-core",
  "agnt-llm",
  "agnt-llm-openai",
+ "agnt-llm-registry",
  "crossterm",
  "dotenvy",
  "ratatui",
@@ -45,6 +46,7 @@ name = "agnt-llm-openai"
 version = "0.1.0"
 dependencies = [
  "agnt-llm",
+ "agnt-llm-registry",
  "async-stream",
  "async-trait",
  "eventsource-stream",
@@ -55,6 +57,17 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
+]
+
+[[package]]
+name = "agnt-llm-registry"
+version = "0.1.0"
+dependencies = [
+ "agnt-llm",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
