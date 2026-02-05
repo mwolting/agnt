@@ -1,5 +1,5 @@
-use agnt_llm::request::{GenerateRequest, Message};
 use agnt_llm::stream::StreamEvent;
+use agnt_llm_openai::{OpenAIRequestExt, ReasoningEffort};
 use std::io::Write;
 use tokio_stream::StreamExt;
 
@@ -15,12 +15,12 @@ async fn main() {
     let provider = agnt_llm_openai::from_env();
     let model = provider.model("gpt-5-nano");
 
-    let request = GenerateRequest {
-        messages: vec![Message::user(&prompt)],
-        ..Default::default()
-    };
+    let mut req = agnt_llm::request();
+    req.reasoning_effort(ReasoningEffort::Minimal)
+        .user(&prompt);
 
-    let mut stream = model.generate(request).events();
+    let mut stream = model.generate(req).events();
+
     while let Some(event) = stream.next().await {
         match event {
             Ok(StreamEvent::TextDelta(delta)) => {

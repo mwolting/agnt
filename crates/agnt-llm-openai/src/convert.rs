@@ -4,7 +4,7 @@ use agnt_llm::request::{
     AssistantPart, GenerateRequest, Message, SystemPart, ToolChoice, UserPart,
 };
 
-use crate::types::{InputContent, InputItem, OpenAIRequest, OpenAITool, Role};
+use crate::types::{InputContent, InputItem, OpenAIRequest, OpenAITool, ReasoningConfig, Role};
 
 pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest {
     // The Responses API takes `instructions` separately (system message).
@@ -95,6 +95,14 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
         })),
     };
 
+    let reasoning = req
+        .metadata
+        .get("reasoning_effort")
+        .and_then(|v| v.as_str())
+        .map(|effort| ReasoningConfig {
+            effort: effort.to_string(),
+        });
+
     OpenAIRequest {
         model: model_id.to_string(),
         input,
@@ -105,5 +113,6 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
         top_p: req.options.top_p,
         tools,
         tool_choice,
+        reasoning,
     }
 }

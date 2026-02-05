@@ -6,6 +6,7 @@ use agnt_llm::request::GenerateRequest;
 use agnt_llm::response::Response;
 use agnt_llm::{
     LanguageModel, LanguageModelBackend, LanguageModelProvider, LanguageModelProviderBackend,
+    RequestBuilder,
 };
 use std::sync::Arc;
 
@@ -44,6 +45,55 @@ pub fn from_env() -> LanguageModelProvider {
         api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
         ..Default::default()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Extension trait for OpenAI-specific request options
+// ---------------------------------------------------------------------------
+
+/// Extension methods for [`RequestBuilder`] that set OpenAI-specific options.
+///
+/// ```ignore
+/// use agnt_llm_openai::OpenAIRequestExt;
+///
+/// let mut req = agnt_llm::request();
+/// req.system("You are helpful")
+///    .user("Explain monads")
+///    .reasoning_effort("high")
+///    .temperature(0.7);
+/// model.generate(req);
+/// ```
+/// Reasoning effort level for o-series / gpt-5 models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    fn as_str(self) -> &'static str {
+        match self {
+            ReasoningEffort::None => "none",
+            ReasoningEffort::Minimal => "minimal",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::High => "high",
+        }
+    }
+}
+
+pub trait OpenAIRequestExt {
+    /// Set reasoning effort for o-series / gpt-5 models.
+    fn reasoning_effort(&mut self, effort: ReasoningEffort) -> &mut Self;
+}
+
+impl OpenAIRequestExt for RequestBuilder {
+    fn reasoning_effort(&mut self, effort: ReasoningEffort) -> &mut Self {
+        self.meta("reasoning_effort", effort.as_str())
+    }
 }
 
 // ---------------------------------------------------------------------------

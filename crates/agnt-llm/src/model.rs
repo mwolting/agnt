@@ -27,8 +27,8 @@ impl LanguageModel {
     }
 
     /// Generate a streaming response.
-    pub fn generate(&self, request: GenerateRequest) -> Response {
-        self.inner.generate(request)
+    pub fn generate(&self, request: impl Into<GenerateRequest>) -> Response {
+        self.inner.generate(request.into())
     }
 }
 

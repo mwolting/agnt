@@ -5,8 +5,8 @@ use std::collections::HashMap;
 // Top-level request
 // ---------------------------------------------------------------------------
 
-/// A request to generate a language model response.
-#[derive(Default, Debug, Clone)]
+/// The frozen, built request — produced by a builder, consumed by `generate()`.
+#[derive(Debug, Clone)]
 pub struct GenerateRequest {
     pub messages: Vec<Message>,
     pub tools: Vec<Tool>,
@@ -23,6 +23,131 @@ pub struct GenerateOptions {
     pub top_p: Option<f32>,
     pub stop: Option<Vec<String>>,
     pub tool_choice: ToolChoice,
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+/// Provider-agnostic request builder. Provider crates wrap this via
+/// `Deref`/`DerefMut` to add typed provider-specific methods.
+#[derive(Debug, Clone, Default)]
+pub struct RequestBuilder {
+    pub(crate) messages: Vec<Message>,
+    pub(crate) tools: Vec<Tool>,
+    pub(crate) options: GenerateOptions,
+    pub(crate) metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Convenience entry point: `agnt_llm::request()`.
+pub fn request() -> RequestBuilder {
+    RequestBuilder::default()
+}
+
+impl RequestBuilder {
+    // -- messages --
+
+    pub fn system(&mut self, text: impl Into<String>) -> &mut Self {
+        self.messages.push(Message::system(text));
+        self
+    }
+
+    pub fn user(&mut self, text: impl Into<String>) -> &mut Self {
+        self.messages.push(Message::user(text));
+        self
+    }
+
+    pub fn assistant(&mut self, text: impl Into<String>) -> &mut Self {
+        self.messages.push(Message::assistant(text));
+        self
+    }
+
+    pub fn tool_result(
+        &mut self,
+        tool_call_id: impl Into<String>,
+        content: impl Into<String>,
+    ) -> &mut Self {
+        self.messages
+            .push(Message::tool_result(tool_call_id, content));
+        self
+    }
+
+    pub fn message(&mut self, message: Message) -> &mut Self {
+        self.messages.push(message);
+        self
+    }
+
+    pub fn messages(&mut self, messages: impl IntoIterator<Item = Message>) -> &mut Self {
+        self.messages.extend(messages);
+        self
+    }
+
+    // -- tools --
+
+    pub fn tool(&mut self, tool: Tool) -> &mut Self {
+        self.tools.push(tool);
+        self
+    }
+
+    pub fn tools(&mut self, tools: impl IntoIterator<Item = Tool>) -> &mut Self {
+        self.tools.extend(tools);
+        self
+    }
+
+    // -- options --
+
+    pub fn temperature(&mut self, t: f32) -> &mut Self {
+        self.options.temperature = Some(t);
+        self
+    }
+
+    pub fn max_tokens(&mut self, n: u32) -> &mut Self {
+        self.options.max_tokens = Some(n);
+        self
+    }
+
+    pub fn top_p(&mut self, p: f32) -> &mut Self {
+        self.options.top_p = Some(p);
+        self
+    }
+
+    pub fn stop(&mut self, sequences: Vec<String>) -> &mut Self {
+        self.options.stop = Some(sequences);
+        self
+    }
+
+    pub fn tool_choice(&mut self, choice: ToolChoice) -> &mut Self {
+        self.options.tool_choice = choice;
+        self
+    }
+
+    // -- metadata --
+
+    pub fn meta(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> &mut Self {
+        self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    // -- build --
+
+    pub fn build(self) -> GenerateRequest {
+        self.into()
+    }
+}
+
+impl From<RequestBuilder> for GenerateRequest {
+    fn from(b: RequestBuilder) -> Self {
+        GenerateRequest {
+            messages: b.messages,
+            tools: b.tools,
+            options: b.options,
+            metadata: b.metadata,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
