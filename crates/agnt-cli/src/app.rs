@@ -1,5 +1,8 @@
 use agnt_core::{Agent, AgentEvent, AgentStream};
+use agnt_llm::{AssistantPart, Message, UserPart};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+
+use crate::session::SharedSessionStore;
 
 // ---------------------------------------------------------------------------
 // Display messages (what the UI renders)
@@ -40,6 +43,7 @@ pub enum AppState {
 
 pub struct App {
     pub agent: Agent,
+    pub session_store: SharedSessionStore,
     pub messages: Vec<DisplayMessage>,
     pub input: String,
     pub cursor_pos: usize,
@@ -55,10 +59,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(agent: Agent) -> Self {
+    pub fn new(agent: Agent, session_store: SharedSessionStore) -> Self {
         Self {
+            messages: display_messages_from_history(&agent.messages()),
             agent,
-            messages: Vec::new(),
+            session_store,
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
@@ -220,7 +225,16 @@ impl App {
                 self.stream_chunks
                     .push(StreamChunk::Tool(format!("[{}]", display.title)));
             }
-            AgentEvent::TurnComplete { .. } => {
+            AgentEvent::TurnComplete { usage } => {
+                if let Err(err) = self
+                    .session_store
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .persist_turn_from_agent(&self.agent, &usage)
+                {
+                    self.stream_chunks
+                        .push(StreamChunk::Tool(format!("[session save error: {err}]")));
+                }
                 self.finalize_response();
                 self.state = AppState::Idle;
             }
@@ -259,4 +273,65 @@ impl App {
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
     }
+}
+
+pub fn display_messages_from_history(messages: &[Message]) -> Vec<DisplayMessage> {
+    let mut out = Vec::new();
+
+    for message in messages {
+        match message {
+            Message::User { parts } => {
+                let mut chunks = Vec::new();
+                for part in parts {
+                    match part {
+                        UserPart::Text(text) => {
+                            if !text.text.is_empty() {
+                                chunks.push(StreamChunk::Text(text.text.clone()));
+                            }
+                        }
+                        UserPart::Image(image) => {
+                            chunks.push(StreamChunk::Text(format!("[image: {}]", image.url)));
+                        }
+                    }
+                }
+                if !chunks.is_empty() {
+                    out.push(DisplayMessage {
+                        role: Role::User,
+                        chunks,
+                    });
+                }
+            }
+            Message::Assistant { parts } => {
+                let mut chunks = Vec::new();
+                for part in parts {
+                    match part {
+                        AssistantPart::Text(text) => {
+                            if !text.text.is_empty() {
+                                chunks.push(StreamChunk::Text(text.text.clone()));
+                            }
+                        }
+                        AssistantPart::Reasoning(reasoning) => {
+                            if let Some(text) = &reasoning.text
+                                && !text.is_empty()
+                            {
+                                chunks.push(StreamChunk::Reasoning(text.clone()));
+                            }
+                        }
+                        AssistantPart::ToolCall(call) => {
+                            chunks.push(StreamChunk::Tool(format!("[tool: {}]", call.name)));
+                        }
+                    }
+                }
+                if !chunks.is_empty() {
+                    out.push(DisplayMessage {
+                        role: Role::Assistant,
+                        chunks,
+                    });
+                }
+            }
+            Message::System { .. } | Message::Tool { .. } => {}
+        }
+    }
+
+    out
 }

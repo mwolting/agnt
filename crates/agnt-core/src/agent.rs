@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
 use agnt_llm::{LanguageModel, Message, RequestBuilder, ToolDefinition};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
@@ -36,6 +37,11 @@ pub struct Agent {
     state: Arc<Mutex<AgentState>>,
     /// Optional callback applied to every outgoing request.
     configure_request: Option<Arc<ConfigureRequest>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationState {
+    pub messages: Vec<Message>,
 }
 
 impl Agent {
@@ -114,6 +120,18 @@ impl Agent {
     /// Access the conversation history (completed messages only).
     pub fn messages(&self) -> Vec<Message> {
         self.state.lock().unwrap().messages.clone()
+    }
+
+    /// Snapshot conversation state that can be persisted and later restored.
+    pub fn conversation_state(&self) -> ConversationState {
+        ConversationState {
+            messages: self.messages(),
+        }
+    }
+
+    /// Replace in-memory conversation state with a previously saved snapshot.
+    pub fn restore_conversation_state(&self, state: ConversationState) {
+        self.state.lock().unwrap().messages = state.messages;
     }
 
     /// Submit user input and get back a stream of events.

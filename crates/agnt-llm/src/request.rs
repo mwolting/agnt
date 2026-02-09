@@ -197,18 +197,18 @@ pub struct ToolResultPart {
 // Role-specific part enums (composed from reusable parts)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SystemPart {
     Text(TextPart),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UserPart {
     Text(TextPart),
     Image(ImagePart),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AssistantPart {
     Text(TextPart),
     ToolCall(ToolCallPart),
@@ -219,7 +219,7 @@ pub enum AssistantPart {
 // Messages
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     System { parts: Vec<SystemPart> },
     User { parts: Vec<UserPart> },

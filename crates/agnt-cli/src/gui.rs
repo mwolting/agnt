@@ -16,7 +16,8 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::{DisplayMessage, Role, StreamChunk};
+use crate::app::{DisplayMessage, Role, StreamChunk, display_messages_from_history};
+use crate::session::SharedSessionStore;
 
 #[derive(Clone, Copy)]
 enum ThreadBlockKind {
@@ -39,6 +40,7 @@ struct ThreadBlock {
 
 struct AgntGui {
     agent: Agent,
+    session_store: SharedSessionStore,
     input: Entity<InputState>,
     thread_scroll: ScrollHandle,
     messages: Vec<DisplayMessage>,
@@ -54,7 +56,15 @@ struct AgntGui {
 }
 
 impl AgntGui {
-    fn new(agent: Agent, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        agent: Agent,
+        session_store: SharedSessionStore,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let messages = display_messages_from_history(&agent.messages());
+        let message_markdown_states = Self::build_markdown_states(&messages, cx);
+
         let input = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 8)
@@ -86,10 +96,11 @@ impl AgntGui {
 
         Self {
             agent,
+            session_store,
             input,
             thread_scroll: ScrollHandle::new(),
-            messages: Vec::new(),
-            message_markdown_states: Vec::new(),
+            messages,
+            message_markdown_states,
             stream_chunks: Vec::new(),
             stream_markdown_states: Vec::new(),
             generating: false,
@@ -99,6 +110,28 @@ impl AgntGui {
             _blink_task: blink_task,
             _input_subscription: input_subscription,
         }
+    }
+
+    fn build_markdown_states(
+        messages: &[DisplayMessage],
+        cx: &mut Context<Self>,
+    ) -> Vec<Vec<Option<Entity<TextViewState>>>> {
+        let mut all_states = Vec::with_capacity(messages.len());
+        for message in messages {
+            let mut states = Vec::with_capacity(message.chunks.len());
+            for chunk in &message.chunks {
+                let state = match chunk {
+                    StreamChunk::Text(text) | StreamChunk::Reasoning(text) => {
+                        let text = text.clone();
+                        Some(cx.new(move |cx| TextViewState::markdown(&text, cx)))
+                    }
+                    StreamChunk::Tool(_) => None,
+                };
+                states.push(state);
+            }
+            all_states.push(states);
+        }
+        all_states
     }
 
     fn on_input_event(
@@ -267,7 +300,17 @@ impl AgntGui {
                     .push(StreamChunk::Tool(format!("[{}]", display.title)));
                 self.stream_markdown_states.push(None);
             }
-            AgentEvent::TurnComplete { .. } => {
+            AgentEvent::TurnComplete { usage } => {
+                if let Err(err) = self
+                    .session_store
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .persist_turn_from_agent(&self.agent, &usage)
+                {
+                    self.stream_chunks
+                        .push(StreamChunk::Tool(format!("[session save error: {err}]")));
+                    self.stream_markdown_states.push(None);
+                }
                 self.finalize_response();
                 self.generating = false;
             }
@@ -543,9 +586,10 @@ impl Render for AgntGui {
     }
 }
 
-pub fn run(agent: Agent) {
+pub fn run(agent: Agent, session_store: SharedSessionStore) {
     let app = gpui::Application::new();
     let mut agent = Some(agent);
+    let mut session_store = Some(session_store);
 
     app.run(move |cx: &mut GpuiApp| {
         gpui_component::init(cx);
@@ -559,6 +603,10 @@ pub fn run(agent: Agent) {
             cx.quit();
             return;
         };
+        let Some(session_store) = session_store.take() else {
+            cx.quit();
+            return;
+        };
 
         if cx
             .open_window(WindowOptions::default(), move |window, cx| {
@@ -567,7 +615,7 @@ pub fn run(agent: Agent) {
                     true
                 });
 
-                let view = cx.new(|cx| AgntGui::new(agent, window, cx));
+                let view = cx.new(|cx| AgntGui::new(agent, session_store, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .is_err()
