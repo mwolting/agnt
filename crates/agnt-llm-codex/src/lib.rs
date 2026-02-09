@@ -7,7 +7,7 @@ use agnt_llm_registry::{Modalities, ModelLimit, ModelSpec, OAuthPkceAuth, Regist
 
 pub const PROVIDER_ID: &str = "openai-codex";
 pub const PROVIDER_NAME: &str = "OpenAI Codex";
-pub const DEFAULT_MODEL_ID: &str = "gpt-5.2-codex";
+pub const DEFAULT_MODEL_ID: &str = "gpt-5.3-codex";
 
 /// Register the OpenAI Codex OAuth provider.
 pub fn register(registry: &mut Registry) {

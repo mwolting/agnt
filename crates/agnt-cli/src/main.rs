@@ -132,20 +132,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn print_providers(registry: &Registry) {
-    for provider in registry.known_providers() {
-        let status = if provider.configured {
-            "configured"
-        } else {
-            "needs login"
-        };
+    for provider in registry
+        .known_providers()
+        .into_iter()
+        .filter(|provider| provider.configured)
+    {
         let compat = if provider.compatible {
             "compatible"
         } else {
             "no-factory"
         };
         println!(
-            "{} ({}) [{} | {} | {}]",
-            provider.id, provider.name, provider.auth_method, status, compat
+            "{} ({}) [{} | configured | {}]",
+            provider.id, provider.name, provider.auth_method, compat
         );
 
         let mut models = registry.list_models(&provider.id);

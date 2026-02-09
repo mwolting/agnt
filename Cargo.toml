@@ -1,3 +1,11 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+
+[workspace.package]
+license = "MIT"
+repository = "https://github.com/mwolting/agnt"
+homepage = "https://github.com/mwolting/agnt"
+authors = ["Matthijs Wolting"]
+readme = "README.md"
+
