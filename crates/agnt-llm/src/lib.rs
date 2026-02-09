@@ -13,8 +13,9 @@ pub mod describe;
 pub use describe::Describe;
 pub use request::{
     AssistantPart, GenerateOptions, GenerateRequest, ImagePart, Message, Property, ReasoningPart,
-    RequestBuilder, Schema, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolDefinition,
-    ToolResultPart, UserPart, request,
+    RequestBuilder, Schema, SystemPart, TextPart, ToolCallDisplayPart, ToolCallPart,
+    ToolCallResultPart, ToolChoice, ToolDefinition, ToolDisplayBodyPart, ToolResultPart, UserPart,
+    request,
 };
 pub use response::{GenerateResult, Response};
 pub use stream::{FinishReason, StreamEvent, Usage};

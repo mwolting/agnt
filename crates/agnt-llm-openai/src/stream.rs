@@ -205,6 +205,7 @@ impl EventMapper {
                                 name,
                                 arguments,
                                 metadata,
+                                display: None,
                             },
                         }))
                     }

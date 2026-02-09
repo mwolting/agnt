@@ -372,11 +372,21 @@ async fn generation_loop(
 
             match prepared {
                 Ok(prepared) => {
+                    let input_display = prepared.input_display.clone();
+                    {
+                        let mut s = state.lock().unwrap();
+                        set_tool_call_display_start(
+                            &mut s.messages,
+                            &tc.id,
+                            to_tool_call_display_start_part(&input_display),
+                        );
+                    }
+
                     // Emit the input display immediately.
                     if tx
                         .send(AgentEvent::ToolCallStart {
                             id: tc.id.clone(),
-                            display: prepared.input_display,
+                            display: input_display,
                         })
                         .await
                         .is_err()
@@ -387,11 +397,21 @@ async fn generation_loop(
                     // Execute the tool.
                     match prepared.future.await {
                         Ok(result) => {
+                            let output_display = result.output_display.clone();
+                            {
+                                let mut s = state.lock().unwrap();
+                                set_tool_call_display_result(
+                                    &mut s.messages,
+                                    &tc.id,
+                                    to_tool_call_result_part(&output_display),
+                                );
+                            }
+
                             // Emit the output display.
                             if tx
                                 .send(AgentEvent::ToolCallDone {
                                     id: tc.id.clone(),
-                                    display: result.output_display,
+                                    display: output_display,
                                 })
                                 .await
                                 .is_err()
@@ -408,16 +428,23 @@ async fn generation_loop(
                         }
                         Err(e) => {
                             let error_text = format!("tool error: {e}");
+                            let output_display = crate::event::ToolResultDisplay {
+                                title: "error".to_string(),
+                                body: Some(crate::event::DisplayBody::Text(error_text.clone())),
+                            };
+                            {
+                                let mut s = state.lock().unwrap();
+                                set_tool_call_display_result(
+                                    &mut s.messages,
+                                    &tc.id,
+                                    to_tool_call_result_part(&output_display),
+                                );
+                            }
 
                             if tx
                                 .send(AgentEvent::ToolCallDone {
                                     id: tc.id.clone(),
-                                    display: crate::event::ToolResultDisplay {
-                                        title: "error".to_string(),
-                                        body: Some(crate::event::DisplayBody::Text(
-                                            error_text.clone(),
-                                        )),
-                                    },
+                                    display: output_display,
                                 })
                                 .await
                                 .is_err()
@@ -437,14 +464,23 @@ async fn generation_loop(
                 Err(e) => {
                     // Parsing / preparation failed.
                     let error_text = format!("tool error: {e}");
+                    let output_display = crate::event::ToolResultDisplay {
+                        title: "error".to_string(),
+                        body: Some(crate::event::DisplayBody::Text(error_text.clone())),
+                    };
+                    {
+                        let mut s = state.lock().unwrap();
+                        set_tool_call_display_result(
+                            &mut s.messages,
+                            &tc.id,
+                            to_tool_call_result_part(&output_display),
+                        );
+                    }
 
                     if tx
                         .send(AgentEvent::ToolCallDone {
                             id: tc.id.clone(),
-                            display: crate::event::ToolResultDisplay {
-                                title: "error".to_string(),
-                                body: Some(crate::event::DisplayBody::Text(error_text.clone())),
-                            },
+                            display: output_display,
                         })
                         .await
                         .is_err()
@@ -514,4 +550,86 @@ fn load_agents_md(workspace_root: &Path) -> Option<String> {
         return None;
     }
     Some(content)
+}
+
+fn set_tool_call_display_start(
+    messages: &mut [Message],
+    tool_call_id: &str,
+    display: agnt_llm::ToolCallDisplayPart,
+) {
+    for message in messages.iter_mut().rev() {
+        if let Message::Assistant { parts } = message {
+            for part in parts.iter_mut() {
+                if let agnt_llm::AssistantPart::ToolCall(call) = part
+                    && call.id == tool_call_id
+                {
+                    if let Some(existing) = call.display.as_mut() {
+                        existing.title = display.title;
+                        existing.description = display.description;
+                    } else {
+                        call.display = Some(display);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn set_tool_call_display_result(
+    messages: &mut [Message],
+    tool_call_id: &str,
+    result: agnt_llm::ToolCallResultPart,
+) {
+    for message in messages.iter_mut().rev() {
+        if let Message::Assistant { parts } = message {
+            for part in parts.iter_mut() {
+                if let agnt_llm::AssistantPart::ToolCall(call) = part
+                    && call.id == tool_call_id
+                {
+                    if let Some(existing) = call.display.as_mut() {
+                        existing.result = Some(result);
+                    } else {
+                        call.display = Some(agnt_llm::ToolCallDisplayPart {
+                            title: call.name.clone(),
+                            description: None,
+                            result: Some(result),
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn to_tool_call_display_start_part(
+    display: &crate::event::ToolCallDisplay,
+) -> agnt_llm::ToolCallDisplayPart {
+    agnt_llm::ToolCallDisplayPart {
+        title: display.title.clone(),
+        description: display.body.as_ref().map(to_tool_display_body_part),
+        result: None,
+    }
+}
+
+fn to_tool_call_result_part(
+    display: &crate::event::ToolResultDisplay,
+) -> agnt_llm::ToolCallResultPart {
+    agnt_llm::ToolCallResultPart {
+        title: display.title.clone(),
+        body: display.body.as_ref().map(to_tool_display_body_part),
+    }
+}
+
+fn to_tool_display_body_part(body: &crate::event::DisplayBody) -> agnt_llm::ToolDisplayBodyPart {
+    match body {
+        crate::event::DisplayBody::Text(text) => agnt_llm::ToolDisplayBodyPart::Text(text.clone()),
+        crate::event::DisplayBody::Code { language, content } => {
+            agnt_llm::ToolDisplayBodyPart::Code {
+                language: language.clone(),
+                content: content.clone(),
+            }
+        }
+    }
 }

@@ -176,6 +176,9 @@ pub struct ToolCallPart {
     /// Provider-specific metadata. Keys are namespaced (e.g. `"openai:item_id"`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub metadata: HashMap<String, String>,
+    /// Render-oriented display payload for UI hydration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<ToolCallDisplayPart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +194,31 @@ pub struct ReasoningPart {
 pub struct ToolResultPart {
     pub tool_call_id: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallDisplayPart {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<ToolDisplayBodyPart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<ToolCallResultPart>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCallResultPart {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<ToolDisplayBodyPart>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ToolDisplayBodyPart {
+    Text(String),
+    Code {
+        language: Option<String>,
+        content: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

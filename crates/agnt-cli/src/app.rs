@@ -318,7 +318,14 @@ pub fn display_messages_from_history(messages: &[Message]) -> Vec<DisplayMessage
                             }
                         }
                         AssistantPart::ToolCall(call) => {
-                            chunks.push(StreamChunk::Tool(format!("[tool: {}]", call.name)));
+                            if let Some(display) = &call.display {
+                                chunks.push(StreamChunk::Tool(format!("[{}...]", display.title)));
+                                if let Some(result) = &display.result {
+                                    chunks.push(StreamChunk::Tool(format!("[{}]", result.title)));
+                                }
+                            } else {
+                                chunks.push(StreamChunk::Tool(format!("[tool: {}...]", call.name)));
+                            }
                         }
                     }
                 }
