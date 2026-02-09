@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 
 use crate::event::AgentEvent;
 use crate::tool::{ErasedTool, Tool};
-use crate::tools::{BashTool, EditTool, ReadTool, WriteTool};
+use crate::tools::{BashTool, EditTool, ReadTool, SkillTool, WriteTool};
 
 // ---------------------------------------------------------------------------
 // Agent state (shared between handle and spawned task)
@@ -17,6 +17,7 @@ use crate::tools::{BashTool, EditTool, ReadTool, WriteTool};
 struct AgentState {
     messages: Vec<Message>,
     tools: Vec<Box<dyn ErasedTool>>,
+    agents_md: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -46,22 +47,33 @@ impl Agent {
             state: Arc::new(Mutex::new(AgentState {
                 messages: Vec::new(),
                 tools: Vec::new(),
+                agents_md: None,
             })),
             configure_request: None,
         }
     }
 
-    /// Create an agent with the default coding tools (read, write, edit, bash)
+    /// Create an agent with the default coding tools (read, write, edit, skill, bash)
     /// and a system prompt that turns it into a coding assistant.
     ///
     /// `cwd` is the working directory that file and bash tools operate in.
     pub fn with_defaults(model: LanguageModel, cwd: PathBuf) -> Self {
+        let workspace_root = find_workspace_root(&cwd);
+        let agents_md = load_agents_md(&workspace_root);
+        let skills_dir = workspace_root.join(".agents").join("skills");
+
         let mut agent = Self::new(model);
-        agent.system(system_prompt(&cwd));
+        agent.system(system_prompt(&cwd, &workspace_root));
+
+        {
+            let mut s = agent.state.lock().unwrap();
+            s.agents_md = agents_md;
+        }
 
         agent.tool(ReadTool { cwd: cwd.clone() });
         agent.tool(WriteTool { cwd: cwd.clone() });
         agent.tool(EditTool { cwd: cwd.clone() });
+        agent.tool(SkillTool::new(skills_dir));
         agent.tool(BashTool { cwd });
 
         agent
@@ -159,9 +171,16 @@ async fn generation_loop(
     content: String,
     tx: mpsc::Sender<AgentEvent>,
 ) {
-    // 1. Record user message
+    // 1. Record user message and inject AGENTS.md once on first turn.
     {
         let mut s = state.lock().unwrap();
+        if s.messages.is_empty()
+            && let Some(agents_md) = s.agents_md.take()
+        {
+            s.messages.push(Message::system(format!(
+                "Repository instructions from AGENTS.md:\n\n{agents_md}"
+            )));
+        }
         s.messages.push(Message::user(&content));
     }
     if tx
@@ -431,25 +450,50 @@ async fn generation_loop(
 // Default system prompt
 // ---------------------------------------------------------------------------
 
-fn system_prompt(cwd: &std::path::Path) -> String {
+fn system_prompt(cwd: &Path, workspace_root: &Path) -> String {
     format!(
         r#"You are an expert coding assistant. You help the user by reading, writing, editing, and running code in their project.
 
 Working directory: {cwd}
+Workspace root: {workspace_root}
 
-You have four tools:
+You have five tools:
 
 - **read**: Read a file. Give a path relative to the working directory.
 - **write**: Write (or overwrite) a file. Give a relative path and the full content. Parent directories are created automatically.
 - **edit**: Replace text in a file. Give a relative path, the exact `old` text to find, and the `new` replacement. The `old` text must appear exactly once.
+- **skill**: Load a specific local skill by name (available skills are in the tool description).
 - **bash**: Run a shell command. The command runs in the working directory. Returns stdout, stderr, and exit code.
 
 Guidelines:
 - Before editing a file, read it first so you have the exact content to match against.
 - Use edit for surgical changes; use write only when creating new files or replacing the entire content.
 - When running commands, prefer non-interactive invocations.
+- When using `skill`, provide a `name` argument.
 - Be concise in your explanations. Focus on what changed and why.
 - If a command fails, read the error and try to fix it."#,
-        cwd = cwd.display()
+        cwd = cwd.display(),
+        workspace_root = workspace_root.display()
     )
+}
+
+fn find_workspace_root(cwd: &Path) -> PathBuf {
+    let mut current = cwd.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return current;
+        }
+        if !current.pop() {
+            return cwd.to_path_buf();
+        }
+    }
+}
+
+fn load_agents_md(workspace_root: &Path) -> Option<String> {
+    let path = workspace_root.join("AGENTS.md");
+    let content = std::fs::read_to_string(path).ok()?;
+    if content.trim().is_empty() {
+        return None;
+    }
+    Some(content)
 }
