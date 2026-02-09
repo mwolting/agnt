@@ -1,13 +1,14 @@
 # agnt
 
-agnt is a Rust workspace that ships a terminal-first agent app with optional desktop UI, plus the supporting crates for LLM providers, auth, and registry wiring.
+Just barely a coding agent.
 
 ## Features
 
-- Terminal UI (default) and desktop GUI modes.
-- Provider registry with OpenAI-compatible and Codex presets.
+- TUI and GUI modes.
+- Provider registry with models.dev + API key support for many providers.
+- Codex provider.
 - Credential management with API key and OAuth PKCE flows.
-- Session storage for continuing past conversations.
+- Minimal dependencies.
 
 ## Installation
 
@@ -19,19 +20,19 @@ cargo install --git https://github.com/mwolting/agnt
 
 ## Usage
 
-Run the terminal UI (default):
+Run the TUI:
 
 ```bash
 agnt
 ```
 
-Start the desktop GUI:
+Start the GUI:
 
 ```bash
 agnt gui
 ```
 
-List known providers and models:
+List configured providers and their models:
 
 ```bash
 agnt providers
