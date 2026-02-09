@@ -12,6 +12,7 @@ agnt-llm = { path = "../agnt-llm" }
 agnt-llm-registry = { path = "../agnt-llm-registry", optional = true }
 async-stream = "0.3.6"
 async-trait = "0.1.89"
+base64 = "0.22.1"
 eventsource-stream = "0.2.3"
 futures = "0.3.31"
 reqwest = { version = "0.13.1", features = ["stream", "json"] }

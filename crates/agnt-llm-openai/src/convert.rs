@@ -4,11 +4,16 @@ use agnt_llm::request::{
     AssistantPart, GenerateRequest, Message, SystemPart, ToolChoice, UserPart,
 };
 
+use crate::OpenAIConfig;
 use crate::types::{
     InputContent, InputItem, OpenAIRequest, OpenAITool, ReasoningConfig, ReasoningSummary, Role,
 };
 
-pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest {
+pub fn to_openai_request(
+    model_id: &str,
+    req: &GenerateRequest,
+    config: &OpenAIConfig,
+) -> OpenAIRequest {
     // The Responses API takes `instructions` separately (system message).
     // We pull the first system message out and put the rest in `input`.
     let mut instructions: Option<String> = None;
@@ -181,6 +186,12 @@ pub fn to_openai_request(model_id: &str, req: &GenerateRequest) -> OpenAIRequest
         model: model_id.to_string(),
         input,
         stream: true,
+        store: config.response_store,
+        include: if config.include_reasoning_encrypted_content {
+            vec!["reasoning.encrypted_content".to_string()]
+        } else {
+            Vec::new()
+        },
         instructions,
         max_output_tokens: req.options.max_tokens,
         temperature: req.options.temperature,

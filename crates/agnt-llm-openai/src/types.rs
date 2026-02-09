@@ -14,6 +14,10 @@ pub struct OpenAIRequest {
     pub model: String,
     pub input: Vec<InputItem>,
     pub stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,

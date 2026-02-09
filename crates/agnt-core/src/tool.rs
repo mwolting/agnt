@@ -153,10 +153,7 @@ pub(crate) trait ErasedTool: Send + Sync {
     /// This is synchronous — it parses JSON and calls `render_input`, but
     /// does **not** execute the tool. The caller can inspect `input_display`
     /// immediately, then `.await` the `future` when ready.
-    fn prepare(
-        &self,
-        arguments: &str,
-    ) -> Result<PreparedToolCall, agnt_llm::Error>;
+    fn prepare(&self, arguments: &str) -> Result<PreparedToolCall, agnt_llm::Error>;
 }
 
 impl<T: Tool> ErasedTool for T {
@@ -168,10 +165,7 @@ impl<T: Tool> ErasedTool for T {
         }
     }
 
-    fn prepare(
-        &self,
-        arguments: &str,
-    ) -> Result<PreparedToolCall, agnt_llm::Error> {
+    fn prepare(&self, arguments: &str) -> Result<PreparedToolCall, agnt_llm::Error> {
         let input: T::Input =
             serde_json::from_str(arguments).map_err(|e| agnt_llm::Error::Other(e.to_string()))?;
 

@@ -328,10 +328,7 @@ async fn generation_loop(
                 let tool = s.tools.iter().find(|t| t.definition().name == tc.name);
                 match tool {
                     Some(t) => t.prepare(&tc.arguments),
-                    None => Err(agnt_llm::Error::Other(format!(
-                        "unknown tool: {}",
-                        tc.name
-                    ))),
+                    None => Err(agnt_llm::Error::Other(format!("unknown tool: {}", tc.name))),
                 }
                 // lock drops here
             };

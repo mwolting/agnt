@@ -1,7 +1,18 @@
 mod app;
 mod ui;
 
+use std::collections::HashMap;
+use std::io::{self, Write};
+use std::sync::Arc;
+use std::time::Duration;
+
+use agnt_auth::AuthManager;
+use agnt_llm_registry::{AuthMethod, OAuthPkceAuth, Registry};
 use app::{App, AppState};
+use axum::extract::{Query, State};
+use axum::http::{StatusCode, Uri};
+use axum::response::{Html, IntoResponse};
+use axum::{Router, routing::get};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -9,8 +20,14 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use std::io;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
+use url::Url;
+
+const DEFAULT_PROVIDER_ID: &str = agnt_llm_codex::PROVIDER_ID;
+const DEFAULT_MODEL_ID: &str = agnt_llm_codex::DEFAULT_MODEL_ID;
+const OAUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
+const OAUTH_SUCCESS_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\" /><title>Authentication successful</title></head><body><p>Authentication successful. Return to your terminal.</p></body></html>";
 
 /// Restore the terminal to its original state. Called on normal exit and
 /// from the panic hook.
@@ -31,15 +48,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         default_hook(info);
     }));
 
-    // Set up the registry
-    let mut registry = agnt_llm_registry::Registry::new();
+    // Set up auth + registry.
+    let auth_manager = Arc::new(AuthManager::new("agnt"));
+    let mut registry = Registry::new();
+    registry.set_auth_resolver(auth_manager.resolver());
     agnt_llm_openai::register(&mut registry);
+    agnt_llm_codex::register(&mut registry);
     registry.fetch_spec().await?;
 
-    // --providers: list available providers and their models, then exit.
+    // --providers: list all known providers and their models, then exit.
     if std::env::args().any(|a| a == "--providers") {
-        for provider in registry.available_providers() {
-            println!("{} ({})", provider.id, provider.name);
+        for provider in registry.known_providers() {
+            let status = if provider.configured {
+                "configured"
+            } else {
+                "needs login"
+            };
+            let compat = if provider.compatible {
+                "compatible"
+            } else {
+                "no-factory"
+            };
+            println!(
+                "{} ({}) [{} | {} | {}]",
+                provider.id, provider.name, provider.auth_method, status, compat
+            );
+
             let mut models = registry.list_models(&provider.id);
             models.sort_by(|a, b| a.id.cmp(&b.id));
             for model in &models {
@@ -50,7 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let model = registry.model("opencode", "gpt-5.2-codex")?;
+    ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
+
+    let model = registry.model(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID)?;
 
     let cwd = std::env::current_dir()?;
     let mut agent = agnt_core::Agent::with_defaults(model, cwd);
@@ -133,4 +169,163 @@ async fn run(
         }
     }
     Ok(())
+}
+
+async fn ensure_provider_credentials(
+    registry: &Registry,
+    auth: &Arc<AuthManager>,
+    provider_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(request) = registry.auth_request(provider_id) else {
+        return Ok(());
+    };
+
+    match request.auth_method {
+        AuthMethod::ApiKey(_) => {
+            if auth.resolve_cached(&request)?.is_some() {
+                return Ok(());
+            }
+
+            let prompt = format!("Enter API key for {}: ", request.provider_name);
+            let value = rpassword::prompt_password(prompt)?;
+            if value.trim().is_empty() {
+                return Err(format!("no API key provided for {}", request.provider_name).into());
+            }
+            auth.store_api_key(provider_id, value)?;
+        }
+        AuthMethod::OAuthPkce(ref config) => {
+            match auth.refresh_oauth_if_needed(provider_id, config).await {
+                Ok(Some(_)) => return Ok(()),
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!(
+                        "stored OAuth session for {} is not usable ({}); starting sign-in flow",
+                        request.provider_name, err
+                    );
+                }
+            }
+
+            let pending = auth.begin_oauth(provider_id, config)?;
+            println!(
+                "Sign in for {}:\n{}",
+                request.provider_name, pending.authorize_url
+            );
+            if let Err(err) = webbrowser::open(&pending.authorize_url) {
+                eprintln!("failed to open browser: {err}");
+            }
+
+            let authorization_input = match wait_for_oauth_callback(config, &pending.state).await? {
+                Some(code) => code,
+                None => prompt_line("Paste authorization code (or redirect URL): ")?,
+            };
+            auth.complete_oauth(provider_id, config, &pending, &authorization_input)
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Clone)]
+struct CallbackState {
+    expected_path: String,
+    expected_state: String,
+    tx: mpsc::UnboundedSender<Result<String, String>>,
+}
+
+async fn wait_for_oauth_callback(
+    config: &OAuthPkceAuth,
+    expected_state: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let redirect = Url::parse(&config.redirect_url)?;
+    if redirect.scheme() != "http" {
+        return Ok(None);
+    }
+
+    let host = redirect.host_str().unwrap_or("127.0.0.1");
+    if host != "127.0.0.1" && host != "localhost" {
+        return Ok(None);
+    }
+    let port = redirect.port_or_known_default().unwrap_or(80);
+    let bind_host = if host == "localhost" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    let expected_path = redirect.path().to_string();
+
+    let listener = match tokio::net::TcpListener::bind((bind_host, port)).await {
+        Ok(listener) => listener,
+        Err(_) => return Ok(None),
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<Result<String, String>>();
+    let state = CallbackState {
+        expected_path,
+        expected_state: expected_state.to_string(),
+        tx,
+    };
+
+    let app = Router::new()
+        .route("/", get(oauth_callback))
+        .route("/{*path}", get(oauth_callback))
+        .with_state(state);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        let _ = shutdown_rx.await;
+    });
+    let server_task = tokio::spawn(async move {
+        let _ = server.await;
+    });
+
+    let result = tokio::time::timeout(OAUTH_CALLBACK_TIMEOUT, rx.recv()).await;
+    let _ = shutdown_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
+
+    match result {
+        Ok(Some(Ok(code))) => Ok(Some(code)),
+        Ok(Some(Err(message))) => Err(message.into()),
+        Ok(None) => Ok(None),
+        Err(_) => Ok(None),
+    }
+}
+
+async fn oauth_callback(
+    State(state): State<CallbackState>,
+    Query(query): Query<HashMap<String, String>>,
+    uri: Uri,
+) -> impl IntoResponse {
+    if uri.path() != state.expected_path {
+        return (StatusCode::NOT_FOUND, Html("Not found".to_string())).into_response();
+    }
+
+    if query.get("state").map(String::as_str) != Some(state.expected_state.as_str()) {
+        let _ = state
+            .tx
+            .send(Err("oauth callback state mismatch".to_string()));
+        return (StatusCode::BAD_REQUEST, Html("State mismatch".to_string())).into_response();
+    }
+
+    let Some(code) = query.get("code").cloned() else {
+        let _ = state
+            .tx
+            .send(Err("missing authorization code in callback".to_string()));
+        return (
+            StatusCode::BAD_REQUEST,
+            Html("Missing authorization code".to_string()),
+        )
+            .into_response();
+    };
+
+    let _ = state.tx.send(Ok(code));
+    (StatusCode::OK, Html(OAUTH_SUCCESS_HTML.to_string())).into_response()
+}
+
+fn prompt_line(prompt: &str) -> Result<String, io::Error> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
 }

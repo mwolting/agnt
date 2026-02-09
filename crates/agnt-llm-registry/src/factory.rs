@@ -1,31 +1,40 @@
 //! Provider factory trait and configuration options.
 
 use agnt_llm::LanguageModelProvider;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
+use crate::auth::ResolvedAuth;
 use crate::error::Error;
 
 /// Options passed to a [`ProviderFactory`] when constructing a provider.
-///
-/// These are derived from the models.dev spec and the process environment.
 #[derive(Debug, Clone)]
 pub struct ProviderOptions {
     /// The provider identifier (e.g. `"openai"`).
     pub id: String,
-
-    /// API key resolved from the environment (first matching env var found).
-    /// `None` if no env var was specified or none were set.
-    pub api_key: Option<String>,
-
-    /// Base API endpoint. Comes from the models.dev `"api"` field when present.
-    /// `None` means the provider should use its built-in default.
+    /// Base API endpoint. `None` means provider default.
     pub api_endpoint: Option<String>,
+    /// Provider-specific factory options from provider registration.
+    pub(crate) factory_options: Option<Value>,
+    /// Resolved auth payload for this provider.
+    pub auth: ResolvedAuth,
+}
+
+impl ProviderOptions {
+    /// Deserialize provider-specific factory options into a typed payload.
+    pub fn factory_options_as<T>(&self) -> Result<Option<T>, serde_json::Error>
+    where
+        T: DeserializeOwned,
+    {
+        match &self.factory_options {
+            Some(value) => serde_json::from_value(value.clone()).map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 /// A factory that can construct a [`LanguageModelProvider`] from
 /// [`ProviderOptions`].
-///
-/// Implement this trait for concrete provider integrations, or use closures via
-/// [`Registry::add_provider`].
 pub trait ProviderFactory: Send + Sync {
     /// Create a provider instance from the given options.
     fn create(&self, options: ProviderOptions) -> Result<LanguageModelProvider, Error>;

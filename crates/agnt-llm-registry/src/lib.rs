@@ -19,11 +19,15 @@
 //! let mut registry = Registry::new();
 //!
 //! // Register a provider with a factory closure.
-//! // The closure receives ProviderOptions with api_key and api_endpoint
-//! // resolved from the models.dev spec and environment variables.
+//! // The closure receives ProviderOptions with resolved auth and api_endpoint.
 //! registry.add_provider("openai", |options: ProviderOptions| {
 //!     Ok(agnt_llm_openai::provider(OpenAIConfig {
-//!         api_key: options.api_key.unwrap_or_default(),
+//!         auth_token: options
+//!             .auth
+//!             .get("access_token")
+//!             .or_else(|| options.auth.get("api_key"))
+//!             .unwrap_or_default()
+//!             .to_string(),
 //!         base_url: options.api_endpoint
 //!             .unwrap_or_else(|| "https://api.openai.com/v1".into()),
 //!     }))
@@ -40,14 +44,21 @@
 //! // or: let model = registry.model_from_string("openai:gpt-4.1-nano")?;
 //! ```
 
+pub mod auth;
 pub mod error;
 pub mod factory;
+pub mod model_source;
+pub mod provider;
 pub mod registry;
 pub mod spec;
 
+pub use auth::{ApiKeyAuth, AuthMethod, AuthRequest, AuthResolver, OAuthPkceAuth, ResolvedAuth};
 pub use error::Error;
 pub use factory::{ProviderFactory, ProviderOptions};
-pub use registry::{AvailableProvider, Registry};
+pub use model_source::{ModelLoader, ModelSource};
+pub use provider::ProviderRegistration;
+pub use registry::{AvailableProvider, KnownProvider, Registry};
 pub use spec::{
-    ModelCost, ModelLimit, ModelProviderOverride, ModelSpec, Modalities, ModelsDevSpec, ProviderSpec,
+    Modalities, ModelCost, ModelLimit, ModelProviderOverride, ModelSpec, ModelsDevSpec,
+    ProviderSpec,
 };

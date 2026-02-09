@@ -24,4 +24,8 @@ pub enum Error {
     /// Required environment variable is not set.
     #[error("missing environment variable: {0}")]
     MissingEnvVar(String),
+
+    /// No credentials could be resolved for a provider/auth method.
+    #[error("missing credentials for provider '{provider}' (auth method: {method})")]
+    MissingCredentials { provider: String, method: String },
 }

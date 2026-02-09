@@ -5,7 +5,10 @@ mod stream;
 mod types;
 
 #[cfg(feature = "registry")]
-pub use register::register;
+pub use register::{
+    OpenAIProviderBehavior, register, register_oauth_provider,
+    register_oauth_provider_with_behavior,
+};
 
 use agnt_llm::request::GenerateRequest;
 use agnt_llm::response::Response;
@@ -13,6 +16,7 @@ use agnt_llm::{
     LanguageModel, LanguageModelBackend, LanguageModelProvider, LanguageModelProviderBackend,
     RequestBuilder,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -21,15 +25,29 @@ use std::sync::Arc;
 
 /// Configuration for the OpenAI provider.
 pub struct OpenAIConfig {
-    pub api_key: String,
+    pub auth_token: String,
     pub base_url: String,
+    /// Whether to send the Responses API `store` field.
+    /// - `Some(false)` is required for Codex OAuth endpoints.
+    /// - `None` omits the field.
+    pub response_store: Option<bool>,
+    /// Whether to request encrypted reasoning content in responses.
+    pub include_reasoning_encrypted_content: bool,
+    /// Additional headers to include in every request.
+    pub extra_headers: HashMap<String, String>,
+    /// Whether to derive and send `chatgpt-account-id` from the auth token.
+    pub include_chatgpt_account_id_header: bool,
 }
 
 impl Default for OpenAIConfig {
     fn default() -> Self {
         Self {
-            api_key: String::new(),
+            auth_token: String::new(),
             base_url: "https://api.openai.com/v1".into(),
+            response_store: None,
+            include_reasoning_encrypted_content: false,
+            extra_headers: HashMap::new(),
+            include_chatgpt_account_id_header: false,
         }
     }
 }
@@ -47,7 +65,7 @@ pub fn provider(config: OpenAIConfig) -> LanguageModelProvider {
 /// Create an OpenAI provider reading `OPENAI_API_KEY` from the environment.
 pub fn from_env() -> LanguageModelProvider {
     provider(OpenAIConfig {
-        api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        auth_token: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
         ..Default::default()
     })
 }
@@ -169,7 +187,7 @@ impl LanguageModelBackend for OpenAIModel {
     }
 
     fn generate(&self, request: GenerateRequest) -> Response {
-        let body = convert::to_openai_request(&self.model_id, &request);
+        let body = convert::to_openai_request(&self.model_id, &request, &self.state.config);
         let state = Arc::clone(&self.state);
         let event_stream = stream::open(state, body);
         Response::new(event_stream)

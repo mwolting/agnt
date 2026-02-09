@@ -1,14 +1,16 @@
 //! Opens an SSE connection to the OpenAI Responses API and maps events
 //! to the agnt-llm `StreamEvent` type.
 
+use crate::ProviderState;
 use crate::types::{
     FunctionCallArgumentsDelta, OpenAIRequest, OutputItem, OutputItemAdded, OutputItemComplete,
     OutputItemDone, OutputTextDelta, ReasoningSummaryTextDelta, ResponseCompleted,
 };
-use crate::ProviderState;
 use agnt_llm::error::Error;
 use agnt_llm::request::{ReasoningPart, ToolCallPart};
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use eventsource_stream::Eventsource;
 use futures::Stream;
 use std::sync::Arc;
@@ -21,10 +23,21 @@ pub fn open(
     async_stream::try_stream! {
         // Fire the HTTP request
         let url = format!("{}/responses", state.config.base_url);
-        let resp = state
+        let mut req = state
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", state.config.api_key))
+            .header("Authorization", format!("Bearer {}", state.config.auth_token));
+
+        if state.config.include_chatgpt_account_id_header
+            && let Some(account_id) = extract_chatgpt_account_id(&state.config.auth_token)
+        {
+            req = req.header("chatgpt-account-id", account_id);
+        }
+        for (k, v) in &state.config.extra_headers {
+            req = req.header(k, v);
+        }
+
+        let resp = req
             .json(&body)
             .send()
             .await
@@ -57,6 +70,20 @@ pub fn open(
             }
         }
     }
+}
+
+fn extract_chatgpt_account_id(token: &str) -> Option<String> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1];
+    let decoded = URL_SAFE_NO_PAD.decode(payload.as_bytes()).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    json.get("https://api.openai.com/auth")?
+        .get("chatgpt_account_id")?
+        .as_str()
+        .map(ToString::to_string)
 }
 
 // ---------------------------------------------------------------------------

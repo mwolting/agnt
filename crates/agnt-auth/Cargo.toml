@@ -1,0 +1,16 @@
+[package]
+name = "agnt-auth"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agnt-llm-registry = { version = "0.1.0", path = "../agnt-llm-registry" }
+base64 = "0.22.1"
+keyring = { version = "3.6.3", features = ["apple-native"] }
+rand = "0.10.0"
+reqwest = { version = "0.13.2", features = ["form", "json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+url = "2.5.8"

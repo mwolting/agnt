@@ -1,0 +1,8 @@
+[package]
+name = "agnt-llm-codex"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agnt-llm-openai = { version = "0.1.0", path = "../agnt-llm-openai" }
+agnt-llm-registry = { version = "0.1.0", path = "../agnt-llm-registry" }

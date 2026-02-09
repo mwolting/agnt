@@ -41,10 +41,7 @@ impl Response {
                 StreamEvent::ToolCallEnd { call, .. } => {
                     tool_calls.push(call);
                 }
-                StreamEvent::Finish {
-                    reason,
-                    usage: u,
-                } => {
+                StreamEvent::Finish { reason, usage: u } => {
                     finish_reason = Some(reason);
                     usage = u;
                 }

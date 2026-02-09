@@ -12,9 +12,9 @@ pub mod describe;
 
 pub use describe::Describe;
 pub use request::{
-    request, AssistantPart, GenerateOptions, GenerateRequest, ImagePart, Message, Property,
-    ReasoningPart, RequestBuilder, Schema, SystemPart, TextPart, ToolCallPart, ToolChoice,
-    ToolDefinition, ToolResultPart, UserPart,
+    AssistantPart, GenerateOptions, GenerateRequest, ImagePart, Message, Property, ReasoningPart,
+    RequestBuilder, Schema, SystemPart, TextPart, ToolCallPart, ToolChoice, ToolDefinition,
+    ToolResultPart, UserPart, request,
 };
 pub use response::{GenerateResult, Response};
 pub use stream::{FinishReason, StreamEvent, Usage};

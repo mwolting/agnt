@@ -8,12 +8,18 @@ name = "agnt"
 path = "src/main.rs"
 
 [dependencies]
+agnt-auth = { version = "0.1.0", path = "../agnt-auth" }
 agnt-core = { version = "0.1.0", path = "../agnt-core" }
 agnt-llm = { path = "../agnt-llm" }
+agnt-llm-codex = { version = "0.1.0", path = "../agnt-llm-codex" }
 agnt-llm-openai = { path = "../agnt-llm-openai" }
 agnt-llm-registry = { path = "../agnt-llm-registry" }
+axum = "0.8.8"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dotenvy = "0.15.7"
 ratatui = { version = "0.30", features = ["crossterm"] }
+rpassword = "7.4.0"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+url = "2.5.8"
+webbrowser = "1.1.0"
