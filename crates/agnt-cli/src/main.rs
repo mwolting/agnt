@@ -1,4 +1,5 @@
 mod app;
+mod gui;
 mod ui;
 
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::{Html, IntoResponse};
 use axum::{Router, routing::get};
+use clap::{Parser, Subcommand};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -29,6 +31,48 @@ const DEFAULT_MODEL_ID: &str = agnt_llm_codex::DEFAULT_MODEL_ID;
 const OAUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
 const OAUTH_SUCCESS_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\" /><title>Authentication successful</title></head><body><p>Authentication successful. Return to your terminal.</p></body></html>";
 
+#[derive(Parser)]
+#[command(name = "agnt")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    // Backward-compatible alias for `agnt providers`.
+    #[arg(long, hide = true)]
+    providers: bool,
+}
+
+#[derive(Clone, Copy, Subcommand)]
+enum Command {
+    /// Start the terminal UI (default).
+    Tui,
+    /// Start the desktop GUI.
+    Gui,
+    /// List known providers and their models.
+    Providers,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Tui,
+    Gui,
+    Providers,
+}
+
+impl Cli {
+    fn mode(&self) -> Mode {
+        if self.providers {
+            return Mode::Providers;
+        }
+
+        match self.command.unwrap_or(Command::Tui) {
+            Command::Tui => Mode::Tui,
+            Command::Gui => Mode::Gui,
+            Command::Providers => Mode::Providers,
+        }
+    }
+}
+
 /// Restore the terminal to its original state. Called on normal exit and
 /// from the panic hook.
 fn restore_terminal() {
@@ -38,6 +82,9 @@ fn restore_terminal() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    let mode = cli.mode();
+
     let _ = dotenvy::dotenv();
 
     // Install a panic hook that restores the terminal before printing the
@@ -56,45 +103,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     agnt_llm_codex::register(&mut registry);
     registry.fetch_spec().await?;
 
-    // --providers: list all known providers and their models, then exit.
-    if std::env::args().any(|a| a == "--providers") {
-        for provider in registry.known_providers() {
-            let status = if provider.configured {
-                "configured"
-            } else {
-                "needs login"
-            };
-            let compat = if provider.compatible {
-                "compatible"
-            } else {
-                "no-factory"
-            };
-            println!(
-                "{} ({}) [{} | {} | {}]",
-                provider.id, provider.name, provider.auth_method, status, compat
-            );
-
-            let mut models = registry.list_models(&provider.id);
-            models.sort_by(|a, b| a.id.cmp(&b.id));
-            for model in &models {
-                let name = model.name.as_deref().unwrap_or("");
-                println!("  {:<30} {}", model.id, name);
-            }
-        }
+    if mode == Mode::Providers {
+        print_providers(&registry);
         return Ok(());
     }
 
-    ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
+    if mode == Mode::Gui {
+        ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
+        let agent = build_default_agent(&mut registry)?;
+        tokio::task::block_in_place(|| {
+            gui::run(agent);
+        });
+        return Ok(());
+    }
 
-    let model = registry.model(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID)?;
+    run_tui(&mut registry, &auth_manager).await
+}
 
-    let cwd = std::env::current_dir()?;
-    let mut agent = agnt_core::Agent::with_defaults(model, cwd);
+fn print_providers(registry: &Registry) {
+    for provider in registry.known_providers() {
+        let status = if provider.configured {
+            "configured"
+        } else {
+            "needs login"
+        };
+        let compat = if provider.compatible {
+            "compatible"
+        } else {
+            "no-factory"
+        };
+        println!(
+            "{} ({}) [{} | {} | {}]",
+            provider.id, provider.name, provider.auth_method, status, compat
+        );
 
-    use agnt_llm_openai::{OpenAIRequestExt, ReasoningSummary};
-    agent.configure_request(|req| {
-        req.reasoning_summary(ReasoningSummary::Detailed);
-    });
+        let mut models = registry.list_models(&provider.id);
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        for model in &models {
+            let name = model.name.as_deref().unwrap_or("");
+            println!("  {:<30} {}", model.id, name);
+        }
+    }
+}
+
+async fn run_tui(
+    registry: &mut Registry,
+    auth_manager: &Arc<AuthManager>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_provider_credentials(registry, auth_manager, DEFAULT_PROVIDER_ID).await?;
+    let agent = build_default_agent(registry)?;
 
     let mut app = App::new(agent);
 
@@ -114,6 +171,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     restore_terminal();
 
     result
+}
+
+fn build_default_agent(
+    registry: &mut Registry,
+) -> Result<agnt_core::Agent, Box<dyn std::error::Error>> {
+    let model = registry.model(DEFAULT_PROVIDER_ID, DEFAULT_MODEL_ID)?;
+    let cwd = std::env::current_dir()?;
+    let mut agent = agnt_core::Agent::with_defaults(model, cwd);
+
+    use agnt_llm_openai::{OpenAIRequestExt, ReasoningSummary};
+    agent.configure_request(|req| {
+        req.reasoning_summary(ReasoningSummary::Detailed);
+    });
+
+    Ok(agent)
 }
 
 async fn run(
