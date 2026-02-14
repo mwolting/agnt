@@ -1,10 +1,10 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use agnt_core::{Agent, AgentEvent, ConversationState, DisplayBody};
 use gpui::{
     AnyElement, App as GpuiApp, AppContext, ClickEvent, Context, Entity, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle, ScrollWheelEvent,
-    StatefulInteractiveElement as _, Styled, Subscription, Task, Window, WindowOptions, div, px,
+    IntoElement, KeyBinding, ListAlignment, ListState, ParentElement, Pixels, Render,
+    ScrollWheelEvent, Styled, Subscription, Task, Window, WindowOptions, div, list, point, px,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _,
@@ -35,17 +35,21 @@ enum ThreadBlockKind {
     AssistantLabel,
     Markdown,
     ReasoningMarkdown,
+    StreamingMarkdown,
+    StreamingReasoning,
     Tool,
     Cursor,
     Hint,
     Spacer,
 }
 
+#[derive(Clone)]
 struct ThreadBlock {
     kind: ThreadBlockKind,
     text: String,
     markdown_state: Option<Entity<TextViewState>>,
     markdown_id: Option<String>,
+    min_height: Option<Pixels>,
 }
 
 struct AgntGui {
@@ -53,11 +57,12 @@ struct AgntGui {
     session_store: SharedSessionStore,
     input: Entity<InputState>,
     typeahead: GuiTypeahead,
-    thread_scroll: ScrollHandle,
+    thread_list: ListState,
     messages: Vec<DisplayMessage>,
     message_markdown_states: Vec<Vec<Option<Entity<TextViewState>>>>,
     stream_chunks: Vec<StreamChunk>,
     stream_markdown_states: Vec<Option<Entity<TextViewState>>>,
+    stream_block_height_floors: HashMap<String, Pixels>,
     generating: bool,
     cursor_blink_on: bool,
     stick_to_bottom: bool,
@@ -66,6 +71,9 @@ struct AgntGui {
     _blink_task: Task<()>,
     _typeahead_updates_task: Task<()>,
     _input_subscription: Subscription,
+    markdown_remeasure_scheduled: bool,
+    _markdown_remeasure_task: Task<()>,
+    _markdown_state_subscriptions: Vec<Subscription>,
 }
 
 impl AgntGui {
@@ -137,16 +145,17 @@ impl AgntGui {
 
         input.update(cx, |input, cx| input.focus(window, cx));
 
-        Self {
+        let mut this = Self {
             agent,
             session_store,
             input,
             typeahead,
-            thread_scroll: ScrollHandle::new(),
+            thread_list: ListState::new(0, ListAlignment::Top, px(512.)).measure_all(),
             messages,
             message_markdown_states,
             stream_chunks: Vec::new(),
             stream_markdown_states: Vec::new(),
+            stream_block_height_floors: HashMap::new(),
             generating: false,
             cursor_blink_on: true,
             stick_to_bottom: true,
@@ -155,7 +164,14 @@ impl AgntGui {
             _blink_task: blink_task,
             _typeahead_updates_task: typeahead_updates_task,
             _input_subscription: input_subscription,
-        }
+            markdown_remeasure_scheduled: false,
+            _markdown_remeasure_task: Task::ready(()),
+            _markdown_state_subscriptions: Vec::new(),
+        };
+
+        this.thread_list.reset(this.build_thread_blocks().len());
+        this.rebuild_markdown_state_subscriptions(cx);
+        this
     }
 
     fn build_markdown_states(
@@ -164,20 +180,68 @@ impl AgntGui {
     ) -> Vec<Vec<Option<Entity<TextViewState>>>> {
         let mut all_states = Vec::with_capacity(messages.len());
         for message in messages {
-            let mut states = Vec::with_capacity(message.chunks.len());
-            for chunk in &message.chunks {
-                let state = match chunk {
-                    StreamChunk::Text(text) | StreamChunk::Reasoning(text) => {
-                        let text = text.clone();
-                        Some(cx.new(move |cx| TextViewState::markdown(&text, cx)))
-                    }
-                    StreamChunk::Tool(_) => None,
-                };
-                states.push(state);
-            }
-            all_states.push(states);
+            all_states.push(Self::build_markdown_states_for_chunks(&message.chunks, cx));
         }
         all_states
+    }
+
+    fn build_markdown_states_for_chunks(
+        chunks: &[StreamChunk],
+        cx: &mut Context<Self>,
+    ) -> Vec<Option<Entity<TextViewState>>> {
+        let mut states = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            let state = match chunk {
+                StreamChunk::Text(text) | StreamChunk::Reasoning(text) => {
+                    let text = text.clone();
+                    Some(cx.new(move |cx| TextViewState::markdown(&text, cx)))
+                }
+                StreamChunk::Tool(_) => None,
+            };
+            states.push(state);
+        }
+        states
+    }
+
+    fn request_thread_remeasure(&mut self, cx: &mut Context<Self>) {
+        if self.markdown_remeasure_scheduled {
+            return;
+        }
+
+        self.markdown_remeasure_scheduled = true;
+        let delay = if self.generating {
+            Duration::from_millis(120)
+        } else {
+            Duration::from_millis(40)
+        };
+
+        self._markdown_remeasure_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.markdown_remeasure_scheduled = false;
+                this.thread_list.remeasure();
+                this.maybe_auto_scroll_to_bottom();
+                cx.notify();
+            });
+        });
+    }
+    fn rebuild_markdown_state_subscriptions(&mut self, cx: &mut Context<Self>) {
+        let mut subscriptions = Vec::new();
+
+        for state in self
+            .message_markdown_states
+            .iter()
+            .flat_map(|states| states.iter())
+            .chain(self.stream_markdown_states.iter())
+            .filter_map(|state| state.as_ref())
+        {
+            subscriptions.push(cx.observe(state, |this, _, cx| {
+                this.request_thread_remeasure(cx);
+            }));
+        }
+
+        self._markdown_state_subscriptions = subscriptions;
     }
 
     fn on_input_event(
@@ -302,8 +366,8 @@ impl AgntGui {
     }
 
     fn distance_from_bottom(&self) -> Pixels {
-        let offset = self.thread_scroll.offset().y;
-        let max = self.thread_scroll.max_offset().height;
+        let offset = self.thread_list.scroll_px_offset_for_scrollbar().y;
+        let max = self.thread_list.max_offset_for_scrollbar().height;
         (max + offset).abs()
     }
 
@@ -313,7 +377,9 @@ impl AgntGui {
         }
 
         if self.stick_to_bottom {
-            self.thread_scroll.scroll_to_bottom();
+            let max = self.thread_list.max_offset_for_scrollbar().height;
+            self.thread_list
+                .set_offset_from_scrollbar(point(px(0.), -max));
         }
     }
 
@@ -354,6 +420,7 @@ impl AgntGui {
     fn start_stream(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.stream_chunks.clear();
         self.stream_markdown_states.clear();
+        self.stream_block_height_floors.clear();
         self.generating = true;
         self.cursor_blink_on = true;
         cx.notify();
@@ -375,7 +442,7 @@ impl AgntGui {
 
             _ = this.update_in(window, |this, _, cx| {
                 if this.generating {
-                    this.finalize_response();
+                    this.finalize_response(cx);
                     this.generating = false;
                     cx.notify();
                 }
@@ -389,6 +456,7 @@ impl AgntGui {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut markdown_states_changed = false;
         match event {
             AgentEvent::UserMessage { content } => {
                 self.messages.push(DisplayMessage {
@@ -404,6 +472,7 @@ impl AgntGui {
                     }
                 });
                 self.message_markdown_states.push(vec![Some(state)]);
+                markdown_states_changed = true;
             }
             AgentEvent::TextDelta { delta } => {
                 if let Some(StreamChunk::Text(s)) = self.stream_chunks.last_mut() {
@@ -415,6 +484,7 @@ impl AgntGui {
                     self.stream_chunks.push(StreamChunk::Text(delta.clone()));
                     let state = cx.new(|cx| TextViewState::markdown(&delta, cx));
                     self.stream_markdown_states.push(Some(state));
+                    markdown_states_changed = true;
                 }
             }
             AgentEvent::ReasoningDelta { delta } => {
@@ -428,6 +498,7 @@ impl AgntGui {
                         .push(StreamChunk::Reasoning(delta.clone()));
                     let state = cx.new(|cx| TextViewState::markdown(&delta, cx));
                     self.stream_markdown_states.push(Some(state));
+                    markdown_states_changed = true;
                 }
             }
             AgentEvent::ToolCallStart { display, .. } => {
@@ -458,31 +529,36 @@ impl AgntGui {
                         .push(StreamChunk::Tool(format!("[session save error: {err}]")));
                     self.stream_markdown_states.push(None);
                 }
-                self.finalize_response();
+                self.finalize_response(cx);
                 self.generating = false;
             }
             AgentEvent::Error { error } => {
                 self.stream_chunks
                     .push(StreamChunk::Tool(format!("[error: {error}]")));
                 self.stream_markdown_states.push(None);
-                self.finalize_response();
+                self.finalize_response(cx);
                 self.generating = false;
             }
         }
 
+        if markdown_states_changed {
+            self.rebuild_markdown_state_subscriptions(cx);
+        }
         self.maybe_auto_scroll_to_bottom();
         cx.notify();
     }
 
-    fn finalize_response(&mut self) {
+    fn finalize_response(&mut self, cx: &mut Context<Self>) {
         let chunks = std::mem::take(&mut self.stream_chunks);
         let states = std::mem::take(&mut self.stream_markdown_states);
+        self.stream_block_height_floors.clear();
         if !chunks.is_empty() {
             self.messages.push(DisplayMessage {
                 role: Role::Assistant,
                 chunks,
             });
             self.message_markdown_states.push(states);
+            self.rebuild_markdown_state_subscriptions(cx);
         }
     }
 
@@ -532,7 +608,7 @@ impl AgntGui {
 
     fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.generating {
-            self.finalize_response();
+            self.finalize_response(cx);
             self.generating = false;
         }
 
@@ -545,7 +621,7 @@ impl AgntGui {
 
     fn open_resume_dialog(&mut self, cx: &mut Context<Self>) {
         if self.generating {
-            self.finalize_response();
+            self.finalize_response(cx);
             self.generating = false;
         }
 
@@ -620,9 +696,12 @@ impl AgntGui {
         self.message_markdown_states = Self::build_markdown_states(&self.messages, cx);
         self.stream_chunks.clear();
         self.stream_markdown_states.clear();
+        self.stream_block_height_floors.clear();
         self.cursor_blink_on = true;
         self.stick_to_bottom = true;
         self.resume_dialog = None;
+        self.thread_list.reset(self.build_thread_blocks().len());
+        self.rebuild_markdown_state_subscriptions(cx);
         self.set_input_text_and_cursor(String::new(), 0, window, cx);
     }
 
@@ -724,6 +803,7 @@ impl AgntGui {
                     text: String::new(),
                     markdown_state: None,
                     markdown_id: None,
+                    min_height: None,
                 });
             }
 
@@ -739,10 +819,17 @@ impl AgntGui {
                 },
                 markdown_state: None,
                 markdown_id: None,
+                min_height: None,
             });
 
             let states = self.message_markdown_states.get(msg_ix);
-            Self::append_chunk_blocks(&msg.chunks, states, &format!("msg-{msg_ix}"), &mut blocks);
+            Self::append_chunk_blocks(
+                &msg.chunks,
+                states,
+                &format!("msg-{msg_ix}"),
+                false,
+                &mut blocks,
+            );
         }
 
         if self.generating || !self.stream_chunks.is_empty() {
@@ -752,6 +839,7 @@ impl AgntGui {
                     text: String::new(),
                     markdown_state: None,
                     markdown_id: None,
+                    min_height: None,
                 });
             }
 
@@ -760,12 +848,14 @@ impl AgntGui {
                 text: "Assistant".to_string(),
                 markdown_state: None,
                 markdown_id: None,
+                min_height: None,
             });
 
             Self::append_chunk_blocks(
                 &self.stream_chunks,
                 Some(&self.stream_markdown_states),
                 "stream",
+                true,
                 &mut blocks,
             );
 
@@ -775,6 +865,7 @@ impl AgntGui {
                     text: if self.cursor_blink_on { "▌" } else { " " }.to_string(),
                     markdown_state: None,
                     markdown_id: None,
+                    min_height: None,
                 });
             }
         }
@@ -785,6 +876,7 @@ impl AgntGui {
                 text: "Type a message and press Enter. Use Shift+Enter for newline.".to_string(),
                 markdown_state: None,
                 markdown_id: None,
+                min_height: None,
             });
         }
 
@@ -795,6 +887,7 @@ impl AgntGui {
         chunks: &[StreamChunk],
         states: Option<&Vec<Option<Entity<TextViewState>>>>,
         id_prefix: &str,
+        streaming: bool,
         blocks: &mut Vec<ThreadBlock>,
     ) {
         for (i, chunk) in chunks.iter().enumerate() {
@@ -807,38 +900,100 @@ impl AgntGui {
                         text: String::new(),
                         markdown_state: None,
                         markdown_id: None,
+                        min_height: None,
                     });
                 }
             }
 
             match chunk {
                 StreamChunk::Reasoning(s) => blocks.push(ThreadBlock {
-                    kind: ThreadBlockKind::ReasoningMarkdown,
+                    kind: if streaming {
+                        ThreadBlockKind::StreamingReasoning
+                    } else {
+                        ThreadBlockKind::ReasoningMarkdown
+                    },
                     text: s.clone(),
                     markdown_state: states
                         .and_then(|states| states.get(i))
                         .and_then(|state| state.clone()),
                     markdown_id: Some(format!("{id_prefix}-{i}")),
+                    min_height: None,
                 }),
                 StreamChunk::Text(s) => blocks.push(ThreadBlock {
-                    kind: ThreadBlockKind::Markdown,
+                    kind: if streaming {
+                        ThreadBlockKind::StreamingMarkdown
+                    } else {
+                        ThreadBlockKind::Markdown
+                    },
                     text: s.clone(),
                     markdown_state: states
                         .and_then(|states| states.get(i))
                         .and_then(|state| state.clone()),
                     markdown_id: Some(format!("{id_prefix}-{i}")),
+                    min_height: None,
                 }),
                 StreamChunk::Tool(s) => blocks.push(ThreadBlock {
                     kind: ThreadBlockKind::Tool,
                     text: s.clone(),
                     markdown_state: None,
                     markdown_id: None,
+                    min_height: None,
                 }),
             }
         }
     }
 
-    fn render_block(block: ThreadBlock, cx: &mut Context<Self>) -> AnyElement {
+    fn sync_thread_list_window(&self, block_count: usize) {
+        let current_count = self.thread_list.item_count();
+        if block_count > current_count {
+            self.thread_list
+                .splice(current_count..current_count, block_count - current_count);
+        } else if block_count < current_count {
+            self.thread_list.splice(block_count..current_count, 0);
+        }
+    }
+
+    fn apply_stream_height_floors(&mut self, blocks: &mut [ThreadBlock]) {
+        if !self.generating {
+            self.stream_block_height_floors.clear();
+            return;
+        }
+
+        let mut active_ids = Vec::new();
+        for (ix, block) in blocks.iter_mut().enumerate() {
+            if !matches!(
+                block.kind,
+                ThreadBlockKind::StreamingMarkdown | ThreadBlockKind::StreamingReasoning
+            ) {
+                continue;
+            }
+
+            let Some(id) = block.markdown_id.as_ref() else {
+                continue;
+            };
+
+            active_ids.push(id.clone());
+
+            if let Some(bounds) = self.thread_list.bounds_for_item(ix) {
+                let observed = bounds.size.height;
+                self.stream_block_height_floors
+                    .entry(id.clone())
+                    .and_modify(|height| {
+                        if observed > *height {
+                            *height = observed;
+                        }
+                    })
+                    .or_insert(observed);
+            }
+
+            block.min_height = self.stream_block_height_floors.get(id).copied();
+        }
+
+        self.stream_block_height_floors
+            .retain(|id, _| active_ids.iter().any(|active| active == id));
+    }
+
+    fn render_block(block: ThreadBlock, cx: &mut gpui::App) -> AnyElement {
         match block.kind {
             ThreadBlockKind::Spacer => div().h_2().into_any_element(),
             ThreadBlockKind::UserLabel => div()
@@ -876,6 +1031,31 @@ impl AgntGui {
                     div().w_full().child(view).into_any_element()
                 }
             }
+            ThreadBlockKind::StreamingMarkdown | ThreadBlockKind::StreamingReasoning => {
+                let view = if let Some(state) = block.markdown_state {
+                    TextView::new(&state).selectable(true)
+                } else {
+                    let id = block
+                        .markdown_id
+                        .unwrap_or_else(|| "thread-md-fallback".to_string());
+                    TextView::markdown(id, block.text).selectable(true)
+                };
+
+                let mut container = div().w_full();
+                if let Some(min_height) = block.min_height {
+                    container = container.min_h(min_height);
+                }
+
+                if matches!(block.kind, ThreadBlockKind::StreamingReasoning) {
+                    container
+                        .text_color(cx.theme().muted_foreground)
+                        .italic()
+                        .child(view)
+                        .into_any_element()
+                } else {
+                    container.child(view).into_any_element()
+                }
+            }
             ThreadBlockKind::Tool => div()
                 .w_full()
                 .text_sm()
@@ -903,7 +1083,14 @@ impl Render for AgntGui {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.maybe_auto_scroll_to_bottom();
 
-        let blocks = self.build_thread_blocks();
+        let mut blocks = self.build_thread_blocks();
+        self.sync_thread_list_window(blocks.len());
+        self.apply_stream_height_floors(&mut blocks);
+        let thread_list = list(self.thread_list.clone(), {
+            let blocks = blocks;
+            move |ix, _window, cx| Self::render_block(blocks[ix].clone(), cx)
+        })
+        .size_full();
         let resume_dialog_panel = self.render_resume_dialog_panel(cx);
         let typeahead_panel = self.render_typeahead_panel(cx);
         let send_label = if self.generating {
@@ -961,19 +1148,11 @@ impl Render for AgntGui {
                         div()
                             .id("thread-scroll-area")
                             .size_full()
-                            .track_scroll(&self.thread_scroll)
-                            .overflow_y_scroll()
                             .on_scroll_wheel(cx.listener(Self::on_thread_scroll))
                             .p_3()
-                            .child(
-                                v_flex().w_full().gap_1().children(
-                                    blocks
-                                        .into_iter()
-                                        .map(|block| Self::render_block(block, cx)),
-                                ),
-                            ),
+                            .child(thread_list),
                     )
-                    .vertical_scrollbar(&self.thread_scroll),
+                    .vertical_scrollbar(&self.thread_list),
             )
             .child(input_section)
     }
