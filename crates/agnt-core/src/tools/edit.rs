@@ -2,9 +2,10 @@ use std::io::ErrorKind;
 
 use agnt_llm::{Describe, Schema};
 use serde::Deserialize;
+use similar::{ChangeTag, TextDiff};
 
-use super::hashline::{FileLines, replacement_lines, resolve_anchor};
-use crate::event::{ToolCallDisplay, ToolResultDisplay};
+use super::hashline::{FileLines, hashline, replacement_lines, resolve_anchor};
+use crate::event::{DisplayBody, ToolCallDisplay, ToolResultDisplay};
 use crate::tool::{Tool, ToolOutput};
 
 const TOOL_DESCRIPTION: &str = include_str!("../../resources/tools/edit.md");
@@ -199,11 +200,12 @@ pub struct EditOutput {
     pub path: String,
     pub deleted: bool,
     pub operations_applied: usize,
+    pub final_diff: String,
 }
 
 impl ToolOutput for EditOutput {
     fn to_llm(&self) -> String {
-        if self.deleted {
+        let summary = if self.deleted {
             format!("deleted {}", self.path)
         } else if self.input_path != self.path {
             format!(
@@ -214,6 +216,15 @@ impl ToolOutput for EditOutput {
             format!(
                 "edited {} with {} operation(s)",
                 self.path, self.operations_applied
+            )
+        };
+
+        if self.final_diff.is_empty() {
+            summary
+        } else {
+            format!(
+                "{summary}\n\nfinal diff (hashline-formatted):\n{}",
+                self.final_diff
             )
         }
     }
@@ -250,6 +261,7 @@ impl Tool for EditTool {
         }
 
         let mut state = EditState::load(self.cwd.clone(), input_path).await?;
+        let initial_snapshot = snapshot_state(&state);
         for (idx, operation) in input.operations.iter().enumerate() {
             apply_operation(operation, &mut state).map_err(|err| {
                 agnt_llm::Error::Other(format!(
@@ -262,6 +274,8 @@ impl Tool for EditTool {
 
         let deleted = state.file.is_none();
         let final_path = state.current_path.clone();
+        let final_snapshot = snapshot_state(&state);
+        let final_diff = render_unified_patch(&initial_snapshot, &final_snapshot);
         state.persist().await?;
 
         Ok(EditOutput {
@@ -269,6 +283,7 @@ impl Tool for EditTool {
             path: final_path,
             deleted,
             operations_applied: input.operations.len(),
+            final_diff,
         })
     }
 
@@ -298,7 +313,8 @@ impl Tool for EditTool {
             )
         };
 
-        ToolResultDisplay { title, body: None }
+        let body = render_diff_body(&output.final_diff);
+        ToolResultDisplay { title, body }
     }
 }
 
@@ -366,6 +382,128 @@ impl EditState {
     }
 }
 
+#[derive(Clone)]
+struct FileSnapshot {
+    path: String,
+    exists: bool,
+    lines: Vec<String>,
+}
+
+fn snapshot_state(state: &EditState) -> FileSnapshot {
+    match &state.file {
+        Some(file) => FileSnapshot {
+            path: state.current_path.clone(),
+            exists: true,
+            lines: file.lines.clone(),
+        },
+        None => FileSnapshot {
+            path: state.current_path.clone(),
+            exists: false,
+            lines: Vec::new(),
+        },
+    }
+}
+
+fn render_diff_body(diff: &str) -> Option<DisplayBody> {
+    if diff.is_empty() {
+        None
+    } else {
+        Some(DisplayBody::Diff(diff.to_string()))
+    }
+}
+
+// 5 lines of context means nearby hunks separated by <10 unchanged lines naturally coalesce.
+const HUNK_CONTEXT_LINES: usize = 5;
+
+fn render_unified_patch(before: &FileSnapshot, after: &FileSnapshot) -> String {
+    let mut patch = String::new();
+    patch.push_str(&format!(
+        "--- {}\n",
+        diff_label("a", &before.path, before.exists)
+    ));
+    patch.push_str(&format!(
+        "+++ {}\n",
+        diff_label("b", &after.path, after.exists)
+    ));
+
+    let before_text = before.lines.join("\n");
+    let after_text = after.lines.join("\n");
+    let diff = TextDiff::from_lines(&before_text, &after_text);
+    let groups = diff.grouped_ops(HUNK_CONTEXT_LINES);
+
+    if groups.is_empty() {
+        patch.push_str("@@ -0,0 +0,0 @@\n");
+        patch.push_str(" (no content changes)\n");
+        return patch;
+    }
+
+    for group in groups {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let old_start = first.old_range().start;
+        let old_end = last.old_range().end;
+        let new_start = first.new_range().start;
+        let new_end = last.new_range().end;
+        let old_len = old_end.saturating_sub(old_start);
+        let new_len = new_end.saturating_sub(new_start);
+
+        patch.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            hunk_start_line(old_start, old_len),
+            old_len,
+            hunk_start_line(new_start, new_len),
+            new_len
+        ));
+
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                let line = change_line_content(change.value());
+                match change.tag() {
+                    ChangeTag::Equal => {
+                        if let Some(old_idx) = change.old_index() {
+                            patch.push(' ');
+                            patch.push_str(&hashline(old_idx + 1, line));
+                            patch.push('\n');
+                        }
+                    }
+                    ChangeTag::Delete => {
+                        if let Some(old_idx) = change.old_index() {
+                            patch.push('-');
+                            patch.push_str(&hashline(old_idx + 1, line));
+                            patch.push('\n');
+                        }
+                    }
+                    ChangeTag::Insert => {
+                        if let Some(new_idx) = change.new_index() {
+                            patch.push('+');
+                            patch.push_str(&hashline(new_idx + 1, line));
+                            patch.push('\n');
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    patch
+}
+
+fn hunk_start_line(start: usize, count: usize) -> usize {
+    if count == 0 { start } else { start + 1 }
+}
+
+fn change_line_content(value: &str) -> &str {
+    value.trim_end_matches('\n').trim_end_matches('\r')
+}
+
+fn diff_label(prefix: &str, path: &str, exists: bool) -> String {
+    if exists {
+        format!("{prefix}/{path}")
+    } else {
+        "/dev/null".to_string()
+    }
+}
 fn apply_operation(operation: &EditOperation, state: &mut EditState) -> Result<(), String> {
     match operation {
         EditOperation::Replace { .. }

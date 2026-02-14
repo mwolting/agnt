@@ -1,5 +1,5 @@
-use agnt_core::{Agent, AgentEvent, AgentStream, ConversationState};
-use agnt_llm::{AssistantPart, Message, UserPart};
+use agnt_core::{Agent, AgentEvent, AgentStream, ConversationState, DisplayBody};
+use agnt_llm::{AssistantPart, Message, ToolDisplayBodyPart, UserPart};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use tokio::sync::watch;
 
@@ -262,8 +262,12 @@ impl App {
                     .push(StreamChunk::Tool(format!("[{}...]", display.title)));
             }
             AgentEvent::ToolCallDone { display, .. } => {
+                let diff = diff_from_display_body(display.body.as_ref());
                 self.stream_chunks
                     .push(StreamChunk::Tool(format!("[{}]", display.title)));
+                if let Some(diff) = diff {
+                    push_tool_diff_chunks(&mut self.stream_chunks, diff);
+                }
             }
             AgentEvent::TurnComplete { usage } => {
                 if let Err(err) = self
@@ -536,6 +540,11 @@ pub fn display_messages_from_history(messages: &[Message]) -> Vec<DisplayMessage
                                 chunks.push(StreamChunk::Tool(format!("[{}...]", display.title)));
                                 if let Some(result) = &display.result {
                                     chunks.push(StreamChunk::Tool(format!("[{}]", result.title)));
+                                    if let Some(diff) =
+                                        diff_from_tool_display_body(result.body.as_ref())
+                                    {
+                                        push_tool_diff_chunks(&mut chunks, diff);
+                                    }
                                 }
                             } else {
                                 chunks.push(StreamChunk::Tool(format!("[tool: {}...]", call.name)));
@@ -555,4 +564,27 @@ pub fn display_messages_from_history(messages: &[Message]) -> Vec<DisplayMessage
     }
 
     out
+}
+
+fn diff_from_display_body(body: Option<&DisplayBody>) -> Option<&str> {
+    match body {
+        Some(DisplayBody::Diff(diff)) if !diff.is_empty() => Some(diff.as_str()),
+        _ => None,
+    }
+}
+
+fn diff_from_tool_display_body(body: Option<&ToolDisplayBodyPart>) -> Option<&str> {
+    match body {
+        Some(ToolDisplayBodyPart::Diff(diff)) if !diff.is_empty() => Some(diff.as_str()),
+        _ => None,
+    }
+}
+
+fn push_tool_diff_chunks(chunks: &mut Vec<StreamChunk>, diff: &str) {
+    for line in diff.lines() {
+        chunks.push(StreamChunk::Tool(line.to_string()));
+    }
+    if diff.ends_with('\n') {
+        chunks.push(StreamChunk::Tool(String::new()));
+    }
 }

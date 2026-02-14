@@ -621,5 +621,6 @@ fn to_tool_display_body_part(body: &crate::event::DisplayBody) -> agnt_llm::Tool
                 content: content.clone(),
             }
         }
+        crate::event::DisplayBody::Diff(diff) => agnt_llm::ToolDisplayBodyPart::Diff(diff.clone()),
     }
 }

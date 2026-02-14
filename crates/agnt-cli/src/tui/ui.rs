@@ -156,7 +156,16 @@ fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
                 }
             }
             StreamChunk::Tool(s) => {
-                lines.push(Line::from(Span::styled(s.clone(), DIM)));
+                if s.is_empty() {
+                    lines.push(Line::raw(""));
+                } else {
+                    for text_line in s.lines() {
+                        lines.push(Line::from(Span::styled(text_line.to_string(), DIM)));
+                    }
+                    if s.ends_with('\n') {
+                        lines.push(Line::raw(""));
+                    }
+                }
             }
         }
     }

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use agnt_core::{Agent, AgentEvent, ConversationState};
+use agnt_core::{Agent, AgentEvent, ConversationState, DisplayBody};
 use gpui::{
     AnyElement, App as GpuiApp, AppContext, ClickEvent, Context, Entity, InteractiveElement as _,
     IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle, ScrollWheelEvent,
@@ -436,9 +436,17 @@ impl AgntGui {
                 self.stream_markdown_states.push(None);
             }
             AgentEvent::ToolCallDone { display, .. } => {
+                let diff = diff_from_display_body(display.body.as_ref());
                 self.stream_chunks
                     .push(StreamChunk::Tool(format!("[{}]", display.title)));
                 self.stream_markdown_states.push(None);
+                if let Some(diff) = diff {
+                    push_tool_diff_chunks(
+                        &mut self.stream_chunks,
+                        &mut self.stream_markdown_states,
+                        diff,
+                    );
+                }
             }
             AgentEvent::TurnComplete { usage } => {
                 if let Err(err) = self
@@ -1029,4 +1037,26 @@ fn byte_offset_to_position(text: &str, byte_offset: usize) -> Position {
     }
 
     Position::new(line, character)
+}
+
+fn diff_from_display_body(body: Option<&DisplayBody>) -> Option<&str> {
+    match body {
+        Some(DisplayBody::Diff(diff)) if !diff.is_empty() => Some(diff.as_str()),
+        _ => None,
+    }
+}
+
+fn push_tool_diff_chunks(
+    chunks: &mut Vec<StreamChunk>,
+    states: &mut Vec<Option<Entity<TextViewState>>>,
+    diff: &str,
+) {
+    for line in diff.lines() {
+        chunks.push(StreamChunk::Tool(line.to_string()));
+        states.push(None);
+    }
+    if diff.ends_with('\n') {
+        chunks.push(StreamChunk::Tool(String::new()));
+        states.push(None);
+    }
 }

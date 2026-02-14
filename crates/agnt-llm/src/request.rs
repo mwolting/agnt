@@ -219,6 +219,7 @@ pub enum ToolDisplayBodyPart {
         language: Option<String>,
         content: String,
     },
+    Diff(String),
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,8 @@ pub enum DisplayBody {
         language: Option<String>,
         content: String,
     },
+    /// Unified diff text (raw for now; frontends can render hunks richly later).
+    Diff(String),
 }
 
 // ---------------------------------------------------------------------------
