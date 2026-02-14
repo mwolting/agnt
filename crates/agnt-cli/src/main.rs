@@ -262,8 +262,9 @@ fn build_default_agent(
     let cwd = std::env::current_dir()?;
     let mut agent = agnt_core::Agent::with_defaults(model, cwd);
 
-    use agnt_llm_openai::{OpenAIRequestExt, ReasoningSummary};
+    use agnt_llm_openai::{OpenAIRequestExt, ReasoningEffort, ReasoningSummary};
     agent.configure_request(|req| {
+        req.reasoning_effort(ReasoningEffort::High);
         req.reasoning_summary(ReasoningSummary::Detailed);
     });
 

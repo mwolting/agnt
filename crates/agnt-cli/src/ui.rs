@@ -98,6 +98,10 @@ fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
     result
 }
 
+fn is_empty_line(line: &Line) -> bool {
+    line.spans.iter().all(|span| span.content.is_empty())
+}
+
 /// Append styled lines for a slice of [`StreamChunk`]s.
 fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
     for (i, chunk) in chunks.iter().enumerate() {
@@ -194,6 +198,9 @@ fn build_message_lines(app: &App, width: usize) -> Vec<Line<'static>> {
                     Some(StreamChunk::Text(s) | StreamChunk::Reasoning(s)) => s.ends_with('\n'),
                     None => false,
                 };
+                let needs_new_line =
+                    needs_new_line && !logical_lines.last().is_some_and(is_empty_line);
+
                 if needs_new_line {
                     logical_lines.push(Line::from(cursor_span));
                 } else if let Some(last) = logical_lines.last_mut() {
