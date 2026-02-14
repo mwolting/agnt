@@ -4,6 +4,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use std::sync::OnceLock;
+
 use crate::tui::app::{App, AppState, Role, StreamChunk};
 use crate::tui::session_dialog;
 use crate::typeahead::{
@@ -19,6 +21,53 @@ const REASONING_STYLE: Style = Style::new()
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const TYPEAHEAD_HEADER: Style = Style::new().fg(Color::Yellow);
 const TYPEAHEAD_ACTIVE: Style = Style::new().fg(Color::Yellow);
+const DIFF_META_STYLE: Style = Style::new().fg(Color::DarkGray);
+const DIFF_HEADER_STYLE: Style = Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD);
+const DIFF_HUNK_STYLE: Style = Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalTheme {
+    Dark,
+    Light,
+}
+
+fn terminal_theme() -> TerminalTheme {
+    static THEME: OnceLock<TerminalTheme> = OnceLock::new();
+    *THEME.get_or_init(detect_terminal_theme)
+}
+
+fn detect_terminal_theme() -> TerminalTheme {
+    match termbg::theme(std::time::Duration::from_millis(120)) {
+        Ok(termbg::Theme::Light) => TerminalTheme::Light,
+        Ok(termbg::Theme::Dark) => TerminalTheme::Dark,
+        Err(_) => TerminalTheme::Dark,
+    }
+}
+
+fn diff_added_style() -> Style {
+    match terminal_theme() {
+        TerminalTheme::Dark => Style::new()
+            .fg(Color::Rgb(238, 242, 238))
+            .bg(Color::Rgb(34, 52, 34)),
+        TerminalTheme::Light => Style::new()
+            .fg(Color::Rgb(26, 32, 26))
+            .bg(Color::Rgb(222, 240, 222)),
+    }
+}
+
+fn diff_removed_style() -> Style {
+    match terminal_theme() {
+        TerminalTheme::Dark => Style::new()
+            .fg(Color::Rgb(242, 238, 238))
+            .bg(Color::Rgb(62, 36, 36)),
+        TerminalTheme::Light => Style::new()
+            .fg(Color::Rgb(36, 24, 24))
+            .bg(Color::Rgb(246, 224, 224)),
+    }
+}
+const DIFF_FILE_ADDED_STYLE: Style = Style::new().fg(Color::Green).add_modifier(Modifier::BOLD);
+const DIFF_FILE_REMOVED_STYLE: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+const DIFF_CONTEXT_STYLE: Style = Style::new().fg(Color::Gray);
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -124,6 +173,8 @@ fn is_empty_line(line: &Line) -> bool {
 
 /// Append styled lines for a slice of [`StreamChunk`]s.
 fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
+    let mut diff_state = DiffRenderState::default();
+
     for (i, chunk) in chunks.iter().enumerate() {
         // Blank line between chunks, except consecutive Tool chunks
         // (start + done belong together).
@@ -137,6 +188,7 @@ fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
 
         match chunk {
             StreamChunk::Reasoning(s) => {
+                diff_state.reset();
                 for text_line in s.lines() {
                     lines.push(Line::from(Span::styled(
                         text_line.to_string(),
@@ -148,6 +200,7 @@ fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
                 }
             }
             StreamChunk::Text(s) => {
+                diff_state.reset();
                 for text_line in s.lines() {
                     lines.push(Line::raw(text_line.to_string()));
                 }
@@ -160,7 +213,7 @@ fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
                     lines.push(Line::raw(""));
                 } else {
                     for text_line in s.lines() {
-                        lines.push(Line::from(Span::styled(text_line.to_string(), DIM)));
+                        lines.extend(render_tool_lines(text_line, &mut diff_state));
                     }
                     if s.ends_with('\n') {
                         lines.push(Line::raw(""));
@@ -169,6 +222,240 @@ fn render_chunks(chunks: &[StreamChunk], lines: &mut Vec<Line<'static>>) {
             }
         }
     }
+}
+
+#[derive(Default)]
+struct DiffRenderState {
+    in_diff: bool,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    seen_hunk_in_file: bool,
+    in_hunk: bool,
+    hunk_has_visible_body_line: bool,
+    pending_empty_context_lines: usize,
+}
+
+impl DiffRenderState {
+    fn reset(&mut self) {
+        self.in_diff = false;
+        self.old_path = None;
+        self.new_path = None;
+        self.seen_hunk_in_file = false;
+        self.in_hunk = false;
+        self.hunk_has_visible_body_line = false;
+        self.pending_empty_context_lines = 0;
+    }
+
+    fn display_path(&self) -> &str {
+        self.new_path
+            .as_deref()
+            .or(self.old_path.as_deref())
+            .unwrap_or("file")
+    }
+}
+
+fn is_diff_meta_line(line: &str) -> bool {
+    line.starts_with("diff --git ")
+        || line.starts_with("index ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("dissimilarity index ")
+        || line.starts_with("Binary files ")
+}
+
+fn parse_diff_path_label(label: &str) -> Option<String> {
+    let cleaned = label.trim();
+    if cleaned == "/dev/null" {
+        return None;
+    }
+
+    if let Some(path) = cleaned
+        .strip_prefix("a/")
+        .or_else(|| cleaned.strip_prefix("b/"))
+    {
+        return Some(path.to_string());
+    }
+
+    Some(cleaned.to_string())
+}
+
+fn parse_diff_git_paths(line: &str) -> Option<(Option<String>, Option<String>)> {
+    let body = line.strip_prefix("diff --git ")?;
+    let mut parts = body.split_whitespace();
+    let old_label = parts.next()?;
+    let new_label = parts.next()?;
+    Some((
+        parse_diff_path_label(old_label),
+        parse_diff_path_label(new_label),
+    ))
+}
+
+fn parse_hunk_range(token: &str, marker: char) -> Option<(usize, usize)> {
+    let value = token.strip_prefix(marker)?;
+    if let Some((start, count)) = value.split_once(',') {
+        Some((start.parse().ok()?, count.parse().ok()?))
+    } else {
+        Some((value.parse().ok()?, 1))
+    }
+}
+
+fn parse_hunk_ranges(line: &str) -> Option<((usize, usize), (usize, usize))> {
+    let body = line.strip_prefix("@@ ")?;
+    let end = body.find(" @@")?;
+    let ranges = &body[..end];
+    let mut parts = ranges.split_whitespace();
+    let old_range = parse_hunk_range(parts.next()?, '-')?;
+    let new_range = parse_hunk_range(parts.next()?, '+')?;
+    Some((old_range, new_range))
+}
+
+fn format_hunk_range(start: usize, count: usize) -> String {
+    match count {
+        0 | 1 => start.to_string(),
+        _ => format!("{}-{}", start, start + count - 1),
+    }
+}
+
+fn format_hunk_header(line: &str, state: &DiffRenderState) -> Option<String> {
+    let (_, (new_start, new_count)) = parse_hunk_ranges(line)?;
+    let new_range = format_hunk_range(new_start, new_count);
+    Some(format!("{}:{}", state.display_path(), new_range))
+}
+
+fn take_pending_empty_context_lines(state: &mut DiffRenderState) -> Vec<Line<'static>> {
+    let pending = std::mem::take(&mut state.pending_empty_context_lines);
+    (0..pending)
+        .map(|_| render_diff_change_line("", DIFF_CONTEXT_STYLE))
+        .collect()
+}
+
+fn render_diff_change_line(rest: &str, style: Style) -> Line<'static> {
+    Line::from(Span::styled(rest.to_string(), style))
+}
+
+fn render_file_header_lines(state: &DiffRenderState) -> Vec<Line<'static>> {
+    match (state.old_path.as_deref(), state.new_path.as_deref()) {
+        (Some(old), Some(new)) if old == new => Vec::new(),
+        (Some(old), Some(new)) => vec![
+            Line::from(Span::styled(format!("old {old}"), DIFF_FILE_REMOVED_STYLE)),
+            Line::from(Span::styled(format!("new {new}"), DIFF_FILE_ADDED_STYLE)),
+        ],
+        (Some(old), None) => vec![Line::from(Span::styled(
+            format!("old {old}"),
+            DIFF_FILE_REMOVED_STYLE,
+        ))],
+        (None, Some(new)) => vec![Line::from(Span::styled(
+            format!("new {new}"),
+            DIFF_FILE_ADDED_STYLE,
+        ))],
+        (None, None) => Vec::new(),
+    }
+}
+
+fn render_tool_lines(line: &str, state: &mut DiffRenderState) -> Vec<Line<'static>> {
+    if let Some((old_path, new_path)) = parse_diff_git_paths(line) {
+        state.in_diff = true;
+        state.old_path = old_path;
+        state.new_path = new_path;
+        state.seen_hunk_in_file = false;
+        state.in_hunk = false;
+        state.hunk_has_visible_body_line = false;
+        state.pending_empty_context_lines = 0;
+        return vec![Line::from(Span::styled(line.to_string(), DIFF_META_STYLE))];
+    }
+
+    if is_diff_meta_line(line) {
+        state.in_diff = true;
+        state.in_hunk = false;
+        state.hunk_has_visible_body_line = false;
+        state.pending_empty_context_lines = 0;
+        return vec![Line::from(Span::styled(line.to_string(), DIFF_META_STYLE))];
+    }
+
+    if let Some(rest) = line.strip_prefix("--- ") {
+        state.in_diff = true;
+        state.in_hunk = false;
+        state.hunk_has_visible_body_line = false;
+        state.pending_empty_context_lines = 0;
+        state.old_path = parse_diff_path_label(rest);
+        return Vec::new();
+    }
+
+    if let Some(rest) = line.strip_prefix("+++ ") {
+        state.in_diff = true;
+        state.in_hunk = false;
+        state.hunk_has_visible_body_line = false;
+        state.pending_empty_context_lines = 0;
+        state.new_path = parse_diff_path_label(rest);
+        return render_file_header_lines(state);
+    }
+
+    if line.starts_with("@@") {
+        state.in_diff = true;
+        state.in_hunk = true;
+        state.hunk_has_visible_body_line = false;
+        state.pending_empty_context_lines = 0;
+
+        let mut out = Vec::new();
+        if state.seen_hunk_in_file {
+            out.push(Line::raw(""));
+        }
+        state.seen_hunk_in_file = true;
+        if let Some(formatted) = format_hunk_header(line, state) {
+            out.push(Line::from(Span::styled(formatted, DIFF_HUNK_STYLE)));
+        } else {
+            out.push(Line::from(Span::styled(line.to_string(), DIFF_HUNK_STYLE)));
+        }
+        return out;
+    }
+
+    if state.in_diff {
+        if state.in_hunk {
+            if let Some(rest) = line.strip_prefix('+') {
+                let mut out = take_pending_empty_context_lines(state);
+                out.push(render_diff_change_line(rest, diff_added_style()));
+                state.hunk_has_visible_body_line = true;
+                return out;
+            }
+            if let Some(rest) = line.strip_prefix('-') {
+                let mut out = take_pending_empty_context_lines(state);
+                out.push(render_diff_change_line(rest, diff_removed_style()));
+                state.hunk_has_visible_body_line = true;
+                return out;
+            }
+            if let Some(rest) = line.strip_prefix(' ') {
+                if rest.is_empty() {
+                    if state.hunk_has_visible_body_line {
+                        state.pending_empty_context_lines += 1;
+                    }
+                    return Vec::new();
+                }
+
+                let mut out = take_pending_empty_context_lines(state);
+                out.push(render_diff_change_line(rest, DIFF_CONTEXT_STYLE));
+                state.hunk_has_visible_body_line = true;
+                return out;
+            }
+            if line.starts_with('\\') {
+                let mut out = take_pending_empty_context_lines(state);
+                out.push(Line::from(Span::styled(
+                    line.to_string(),
+                    DIFF_HEADER_STYLE,
+                )));
+                return out;
+            }
+        }
+
+        // Left a diff region.
+        state.reset();
+    }
+
+    vec![Line::from(Span::styled(line.to_string(), DIM))]
 }
 
 /// Build the logical lines for the messages area, then wrap them.
