@@ -5,6 +5,8 @@ use tokio::process::Command;
 use crate::event::{DisplayBody, ToolCallDisplay, ToolResultDisplay};
 use crate::tool::{Tool, ToolOutput};
 
+const TOOL_DESCRIPTION: &str = include_str!("../../resources/tools/bash.md");
+
 #[derive(Clone, Deserialize)]
 pub struct BashInput {
     /// The bash command to run.
@@ -79,7 +81,7 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Run a bash command and return the combined stdout and stderr."
+        TOOL_DESCRIPTION
     }
 
     async fn call(&self, input: BashInput) -> Result<BashOutput, agnt_llm::Error> {

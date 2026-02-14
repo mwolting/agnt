@@ -7,6 +7,8 @@ use serde::Deserialize;
 use crate::event::{DisplayBody, ToolCallDisplay, ToolResultDisplay};
 use crate::tool::Tool;
 
+const TOOL_DESCRIPTION: &str = include_str!("../../resources/tools/skill.md");
+
 #[derive(Clone, Deserialize)]
 pub struct SkillInput {
     /// Skill name to load from `.agents/skills`.
@@ -102,7 +104,7 @@ impl Tool for SkillTool {
 }
 
 fn build_tool_description(skills_dir: &Path) -> String {
-    let mut description = String::from("Load a local skill by name from .agents/skills.");
+    let mut description = TOOL_DESCRIPTION.trim().to_string();
 
     match discover_skills(skills_dir) {
         Ok(skills) if skills.is_empty() => {

@@ -149,7 +149,7 @@ pub fn to_openai_request(
             name: t.name.clone(),
             description: t.description.clone(),
             parameters: t.parameters.to_json_schema(),
-            strict: true,
+            strict: false,
         })
         .collect();
 

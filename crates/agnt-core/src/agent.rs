@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
 use agnt_llm::{LanguageModel, Message, RequestBuilder, ToolDefinition};
+use handlebars::Handlebars;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -10,7 +11,7 @@ use tokio_stream::StreamExt;
 
 use crate::event::AgentEvent;
 use crate::tool::{ErasedTool, Tool};
-use crate::tools::{BashTool, EditTool, ReadTool, SkillTool, WriteTool};
+use crate::tools::{BashTool, EditTool, ReadTool, SkillTool};
 
 // ---------------------------------------------------------------------------
 // Agent state (shared between handle and spawned task)
@@ -60,7 +61,7 @@ impl Agent {
         }
     }
 
-    /// Create an agent with the default coding tools (read, write, edit, skill, bash)
+    /// Create an agent with the default coding tools (read, edit, skill, bash)
     /// and a system prompt that turns it into a coding assistant.
     ///
     /// `cwd` is the working directory that file and bash tools operate in.
@@ -78,7 +79,6 @@ impl Agent {
         }
 
         agent.tool(ReadTool { cwd: cwd.clone() });
-        agent.tool(WriteTool { cwd: cwd.clone() });
         agent.tool(EditTool { cwd: cwd.clone() });
         agent.tool(SkillTool::new(skills_dir));
         agent.tool(BashTool { cwd });
@@ -505,31 +505,20 @@ async fn generation_loop(
 // Default system prompt
 // ---------------------------------------------------------------------------
 
+const SYSTEM_PROMPT_TEMPLATE: &str = include_str!("../resources/SYSTEM_PROMPT.md");
+
 fn system_prompt(cwd: &Path, workspace_root: &Path) -> String {
-    format!(
-        r#"You are an expert coding assistant. You help the user by reading, writing, editing, and running code in their project.
+    let mut handlebars = Handlebars::new();
+    handlebars.set_strict_mode(true);
 
-Working directory: {cwd}
-Workspace root: {workspace_root}
+    let data = serde_json::json!({
+        "cwd": cwd.display().to_string(),
+        "workspace_root": workspace_root.display().to_string(),
+    });
 
-You have five tools:
-
-- **read**: Read a file. Give a path relative to the working directory.
-- **write**: Write (or overwrite) a file. Give a relative path and the full content. Parent directories are created automatically.
-- **edit**: Replace text in a file. Give a relative path, the exact `old` text to find, and the `new` replacement. The `old` text must appear exactly once.
-- **skill**: Load a specific local skill by name (available skills are in the tool description).
-- **bash**: Run a shell command. The command runs in the working directory. Returns stdout, stderr, and exit code.
-
-Guidelines:
-- Before editing a file, read it first so you have the exact content to match against.
-- Use edit for surgical changes; use write only when creating new files or replacing the entire content.
-- When running commands, prefer non-interactive invocations.
-- When using `skill`, provide a `name` argument.
-- Be concise in your explanations. Focus on what changed and why.
-- If a command fails, read the error and try to fix it."#,
-        cwd = cwd.display(),
-        workspace_root = workspace_root.display()
-    )
+    handlebars
+        .render_template(SYSTEM_PROMPT_TEMPLATE, &data)
+        .unwrap_or_else(|_| SYSTEM_PROMPT_TEMPLATE.to_string())
 }
 
 fn find_workspace_root(cwd: &Path) -> PathBuf {
