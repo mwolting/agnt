@@ -1,6 +1,7 @@
 use agnt_core::{Agent, AgentEvent, AgentStream, ConversationState};
 use agnt_llm::{AssistantPart, Message, UserPart};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use tokio::sync::watch;
 
 use crate::session::SharedSessionStore;
 use crate::tui::typeahead::{ActiveTypeahead, TypeaheadActivation, TypeaheadState};
@@ -313,9 +314,12 @@ impl App {
         self.typeahead.selected_index()
     }
 
-    pub fn should_poll_typeahead(&self) -> bool {
-        self.typeahead
-            .has_background_work(&self.input, self.cursor_pos)
+    pub fn typeahead_updates(&self) -> [watch::Receiver<u64>; 2] {
+        self.typeahead.updates()
+    }
+
+    pub async fn shutdown_background_workers(&mut self) {
+        self.typeahead.shutdown().await;
     }
 
     fn apply_typeahead_activation(&mut self, activation: TypeaheadActivation) {

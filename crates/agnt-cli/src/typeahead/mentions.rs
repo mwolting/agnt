@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
@@ -38,171 +37,39 @@ struct FilterCache {
     indices: Vec<usize>,
 }
 
-#[derive(Debug)]
-struct WorkerRequest {
-    request_id: u64,
-    query: String,
-}
-
-#[derive(Debug)]
-struct WorkerResponse {
-    request_id: u64,
-    query: String,
-    matches: Vec<Mention>,
-}
-
-#[derive(Debug)]
-enum WorkerEvent {
-    Ready,
-    Response(WorkerResponse),
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileMentionSource {
-    request_tx: Sender<WorkerRequest>,
-    response_rx: Receiver<WorkerEvent>,
-    index_ready: bool,
-    last_requested_query: Option<String>,
-    pending_request_id: Option<u64>,
-    last_completed_request_id: u64,
-    latest_query: Option<String>,
-    latest_matches: Vec<Mention>,
-    next_request_id: u64,
+    root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileMentionState {
+    entries: Vec<FileEntry>,
+    cache: FilterCache,
 }
 
 impl FileMentionSource {
     pub fn new(root: PathBuf) -> Self {
-        let (request_tx, response_rx) = spawn_file_worker(root);
-        Self {
-            request_tx,
-            response_rx,
-            index_ready: false,
-            last_requested_query: None,
-            pending_request_id: None,
-            last_completed_request_id: 0,
-            latest_query: None,
-            latest_matches: Vec::new(),
-            next_request_id: 0,
-        }
-    }
-
-    pub fn has_pending_work(&self) -> bool {
-        !self.index_ready || self.pending_request_id.is_some()
-    }
-
-    pub fn loading_for_query(&self, query: &str) -> bool {
-        let normalized = query.to_ascii_lowercase();
-        !self.index_ready
-            || (self.pending_request_id.is_some()
-                && self.latest_query.as_deref() != Some(normalized.as_str()))
-    }
-
-    fn drain_worker_responses(&mut self) {
-        while let Ok(event) = self.response_rx.try_recv() {
-            match event {
-                WorkerEvent::Ready => {
-                    self.index_ready = true;
-                }
-                WorkerEvent::Response(response) => {
-                    if response.request_id < self.last_completed_request_id {
-                        continue;
-                    }
-
-                    self.last_completed_request_id = response.request_id;
-                    self.latest_query = Some(response.query);
-                    self.latest_matches = response.matches;
-
-                    if self.pending_request_id == Some(response.request_id) {
-                        self.pending_request_id = None;
-                    } else if self
-                        .pending_request_id
-                        .is_some_and(|request_id| request_id < response.request_id)
-                    {
-                        self.pending_request_id = None;
-                    }
-                }
-            }
-        }
-    }
-
-    fn send_query_request(&mut self, query: &str) {
-        self.next_request_id = self.next_request_id.wrapping_add(1);
-        let request_id = self.next_request_id;
-        let request = WorkerRequest {
-            request_id,
-            query: query.to_string(),
-        };
-
-        if self.request_tx.send(request).is_ok() {
-            self.last_requested_query = Some(query.to_string());
-            self.pending_request_id = Some(request_id);
-        } else {
-            self.pending_request_id = None;
-        }
+        Self { root }
     }
 }
 
 impl TypeaheadSource<Mention> for FileMentionSource {
-    fn query(&mut self, query: &str) -> Vec<Mention> {
+    type State = FileMentionState;
+
+    fn init(self) -> Self::State {
+        let entries = collect_file_entries(&self.root);
+        let cache = FilterCache {
+            query: String::new(),
+            indices: (0..entries.len()).collect(),
+        };
+
+        FileMentionState { entries, cache }
+    }
+
+    fn query(state: &mut Self::State, query: &str) -> Vec<Mention> {
         let normalized = query.to_ascii_lowercase();
-        self.drain_worker_responses();
-        if self.last_requested_query.as_deref() != Some(normalized.as_str()) {
-            self.send_query_request(&normalized);
-            self.drain_worker_responses();
-        }
-
-        if self.latest_query.as_deref() == Some(normalized.as_str()) {
-            self.latest_matches.clone()
-        } else {
-            Vec::new()
-        }
-    }
-}
-
-fn spawn_file_worker(root: PathBuf) -> (Sender<WorkerRequest>, Receiver<WorkerEvent>) {
-    let (request_tx, request_rx) = mpsc::channel::<WorkerRequest>();
-    let (response_tx, response_rx) = mpsc::channel::<WorkerEvent>();
-    let worker = move || run_file_worker(root, request_rx, response_tx);
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        drop(handle.spawn_blocking(worker));
-    } else {
-        drop(std::thread::spawn(worker));
-    }
-
-    (request_tx, response_rx)
-}
-
-fn run_file_worker(
-    root: PathBuf,
-    request_rx: Receiver<WorkerRequest>,
-    response_tx: Sender<WorkerEvent>,
-) {
-    let entries = collect_file_entries(&root);
-    if response_tx.send(WorkerEvent::Ready).is_err() {
-        return;
-    }
-    let mut cache = FilterCache {
-        query: String::new(),
-        indices: (0..entries.len()).collect(),
-    };
-
-    while let Ok(mut request) = request_rx.recv() {
-        while let Ok(newer) = request_rx.try_recv() {
-            request = newer;
-        }
-
-        let matches = find_matches(&entries, &mut cache, &request.query);
-        if response_tx
-            .send(WorkerEvent::Response(WorkerResponse {
-                request_id: request.request_id,
-                query: request.query,
-                matches,
-            }))
-            .is_err()
-        {
-            return;
-        }
+        find_matches(&state.entries, &mut state.cache, &normalized)
     }
 }
 
@@ -390,44 +257,47 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::{FileMentionSource, Mention};
-    use crate::typeahead::provider::TypeaheadSource;
+    use crate::typeahead::TypeaheadProvider;
 
-    fn wait_for_matches(source: &mut FileMentionSource, query: &str) -> Vec<Mention> {
+    async fn wait_until_ready(
+        provider: &mut TypeaheadProvider<Mention, FileMentionSource>,
+        query: &str,
+    ) -> Vec<Mention> {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let matches = source.query(query);
-            if !matches.is_empty() {
-                return matches;
+            let result = provider.query(query);
+            if !result.loading {
+                return result.matches;
             }
 
             assert!(
                 Instant::now() < deadline,
-                "timed out waiting for typeahead results for query '{query}'"
+                "timed out waiting for typeahead readiness for query '{query}'"
             );
-            std::thread::sleep(Duration::from_millis(10));
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
-    #[test]
-    fn file_mentions_index_and_match() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_mentions_index_and_match() {
         let cwd = std::env::current_dir().expect("cwd");
-        let mut source = FileMentionSource::new(cwd);
+        let mut provider = TypeaheadProvider::new('@', FileMentionSource::new(cwd));
 
-        let all = wait_for_matches(&mut source, "");
+        let all = wait_until_ready(&mut provider, "").await;
         assert!(
             !all.is_empty(),
             "file mention source should index at least one file"
         );
 
-        let cargo = wait_for_matches(&mut source, "cargo");
+        let cargo = wait_until_ready(&mut provider, "cargo").await;
         assert!(
             !cargo.is_empty(),
             "expected at least one match for 'cargo' in this repo"
         );
     }
 
-    #[test]
-    fn indexing_covers_both_deep_and_sibling_paths() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn indexing_covers_both_deep_and_sibling_paths() {
         let root = std::env::temp_dir().join(format!(
             "agnt-typeahead-index-test-{}-{}",
             std::process::id(),
@@ -442,8 +312,8 @@ mod tests {
         std::fs::write(root.join("aaa/deep/starved.txt"), "a\n").expect("write deep file");
         std::fs::write(root.join("io_uring/register.rs"), "b\n").expect("write io_uring file");
 
-        let mut source = FileMentionSource::new(root.clone());
-        let matches = wait_for_matches(&mut source, "io_uring");
+        let mut provider = TypeaheadProvider::new('@', FileMentionSource::new(root.clone()));
+        let matches = wait_until_ready(&mut provider, "io_uring").await;
 
         assert!(
             matches.into_iter().any(|mention| {
@@ -453,7 +323,7 @@ mod tests {
             "expected io_uring/register.rs to be indexed"
         );
 
-        let deep_matches = wait_for_matches(&mut source, "starved");
+        let deep_matches = wait_until_ready(&mut provider, "starved").await;
         assert!(
             deep_matches.into_iter().any(|mention| {
                 let Mention::File(path) = mention;
@@ -465,16 +335,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn file_source_excludes_target_directory() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn file_source_excludes_target_directory() {
         let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
             .expect("workspace root")
             .to_path_buf();
 
-        let mut source = FileMentionSource::new(workspace_root);
-        let all = wait_for_matches(&mut source, "");
+        let mut provider = TypeaheadProvider::new('@', FileMentionSource::new(workspace_root));
+        let all = wait_until_ready(&mut provider, "").await;
         for mention in all {
             let Mention::File(path) = mention;
             let text = path.to_string_lossy().replace('\\', "/");
@@ -485,8 +355,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn nested_gitignore_does_not_escape_its_directory_scope() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn nested_gitignore_does_not_escape_its_directory_scope() {
         let root = std::env::temp_dir().join(format!(
             "agnt-typeahead-test-{}-{}",
             std::process::id(),
@@ -506,8 +376,8 @@ mod tests {
             .expect("write target file");
         std::fs::write(root.join(".jj/hidden.txt"), "nope\n").expect("write jj file");
 
-        let mut source = FileMentionSource::new(root.clone());
-        let all = wait_for_matches(&mut source, "");
+        let mut provider = TypeaheadProvider::new('@', FileMentionSource::new(root.clone()));
+        let all = wait_until_ready(&mut provider, "").await;
         let paths = all
             .into_iter()
             .map(|mention| {

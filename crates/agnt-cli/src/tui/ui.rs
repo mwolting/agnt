@@ -357,12 +357,19 @@ fn render_match_set<T: TypeaheadItem>(
 
     let max_items = area.height.saturating_sub(1) as usize;
     if set.matches.is_empty() {
-        let status = if set.loading {
-            if set.query.is_empty() {
-                "  indexing files..."
-            } else {
-                "  searching..."
+        let status = if set.loading && set.show_loading {
+            match set.leader {
+                '@' => {
+                    if set.query.is_empty() {
+                        "  indexing files..."
+                    } else {
+                        "  searching..."
+                    }
+                }
+                _ => "  loading...",
             }
+        } else if set.loading {
+            "  "
         } else {
             "  no matches"
         };

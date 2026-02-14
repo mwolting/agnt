@@ -1,4 +1,7 @@
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use tokio::sync::watch;
 
 use crate::typeahead::{
     CachedPrefixSource, Command, FileMentionSource, Mention, TypeaheadItem, TypeaheadMatchSet,
@@ -58,10 +61,23 @@ pub struct TypeaheadState {
     selected_index: usize,
     command_typeahead: TypeaheadProvider<Command, CachedPrefixSource<Command>>,
     mention_typeahead: TypeaheadProvider<Mention, FileMentionSource>,
+    last_presented_command: Option<TypeaheadMatchSet<Command>>,
+    last_presented_mention: Option<TypeaheadMatchSet<Mention>>,
     trigger_seq: u64,
     suppressed_seq: Option<u64>,
     last_trigger_token: Option<TriggerToken>,
+    loading_indicator: Option<LoadingIndicatorState>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoadingIndicatorState {
+    leader: char,
+    token_start: usize,
+    since: Instant,
+    visible: bool,
+}
+
+const LOADING_TEXT_DELAY: Duration = Duration::from_millis(100);
 
 impl TypeaheadState {
     pub fn new_for_current_project() -> Self {
@@ -78,9 +94,12 @@ impl TypeaheadState {
             selected_index: 0,
             command_typeahead,
             mention_typeahead,
+            last_presented_command: None,
+            last_presented_mention: None,
             trigger_seq: 0,
             suppressed_seq: None,
             last_trigger_token: None,
+            loading_indicator: None,
         }
     }
 
@@ -105,32 +124,34 @@ impl TypeaheadState {
     pub fn visible_matches(&mut self, input: &str, cursor_pos: usize) -> Option<ActiveTypeahead> {
         self.sync(input, cursor_pos);
         if self.suppressed_seq == Some(self.trigger_seq) {
+            self.loading_indicator = None;
             return None;
         }
 
         let prefix = &input[..cursor_pos.min(input.len())];
         let (token_start, leader, query) = extract_query_token(prefix)?;
-        let active = match leader {
+        let mut active = match leader {
             '/' => Some(ActiveTypeahead::Command(build_match_set(
                 &mut self.command_typeahead,
                 query,
                 token_start,
                 prefix.len(),
             ))),
-            '@' => {
-                let matches = self.mention_typeahead.query(query);
-                let loading = self.mention_typeahead.source().loading_for_query(query);
-                Some(ActiveTypeahead::Mention(TypeaheadMatchSet {
-                    leader: self.mention_typeahead.leader(),
-                    query: query.to_string(),
-                    token_start,
-                    cursor_pos: prefix.len(),
-                    loading,
-                    matches,
-                }))
-            }
+            '@' => Some(ActiveTypeahead::Mention(build_match_set(
+                &mut self.mention_typeahead,
+                query,
+                token_start,
+                prefix.len(),
+            ))),
             _ => None,
         };
+
+        if let Some(active) = active.as_mut() {
+            self.apply_loading_delay(active);
+            self.stabilize_loading_transition(active);
+        } else {
+            self.loading_indicator = None;
+        }
 
         if let Some(active) = &active {
             let count = active.match_count();
@@ -142,6 +163,73 @@ impl TypeaheadState {
         }
 
         active
+    }
+
+    fn apply_loading_delay(&mut self, active: &mut ActiveTypeahead) {
+        let (leader, token_start, loading, show_loading) = match active {
+            ActiveTypeahead::Command(set) => (
+                set.leader,
+                set.token_start,
+                &set.loading,
+                &mut set.show_loading,
+            ),
+            ActiveTypeahead::Mention(set) => (
+                set.leader,
+                set.token_start,
+                &set.loading,
+                &mut set.show_loading,
+            ),
+        };
+
+        if !*loading {
+            *show_loading = false;
+            self.loading_indicator = None;
+            return;
+        }
+
+        let now = Instant::now();
+        let same_state = self
+            .loading_indicator
+            .as_ref()
+            .is_some_and(|state| state.leader == leader && state.token_start == token_start);
+
+        if !same_state {
+            self.loading_indicator = Some(LoadingIndicatorState {
+                leader,
+                token_start,
+                since: now,
+                visible: false,
+            });
+            *show_loading = false;
+            return;
+        }
+
+        let Some(state) = self.loading_indicator.as_mut() else {
+            *show_loading = false;
+            return;
+        };
+        if state.visible {
+            *show_loading = true;
+            return;
+        }
+
+        if now.duration_since(state.since) >= LOADING_TEXT_DELAY {
+            state.visible = true;
+            *show_loading = true;
+        } else {
+            *show_loading = false;
+        }
+    }
+
+    fn stabilize_loading_transition(&mut self, active: &mut ActiveTypeahead) {
+        match active {
+            ActiveTypeahead::Command(set) => {
+                stabilize_set_during_loading_delay(&mut self.last_presented_command, set);
+            }
+            ActiveTypeahead::Mention(set) => {
+                stabilize_set_during_loading_delay(&mut self.last_presented_mention, set);
+            }
+        }
     }
 
     pub fn dismiss(&mut self, input: &str, cursor_pos: usize) {
@@ -210,16 +298,16 @@ impl TypeaheadState {
         Some(activation)
     }
 
-    pub fn has_background_work(&self, input: &str, cursor_pos: usize) -> bool {
-        let prefix = &input[..cursor_pos.min(input.len())];
-        let Some((_, leader, _)) = extract_query_token(prefix) else {
-            return false;
-        };
+    pub fn updates(&self) -> [watch::Receiver<u64>; 2] {
+        [
+            self.command_typeahead.updates(),
+            self.mention_typeahead.updates(),
+        ]
+    }
 
-        match leader {
-            '@' => self.mention_typeahead.source().has_pending_work(),
-            _ => false,
-        }
+    pub async fn shutdown(&mut self) {
+        self.command_typeahead.shutdown().await;
+        self.mention_typeahead.shutdown().await;
     }
 }
 
@@ -233,13 +321,32 @@ where
     T: TypeaheadItem,
     S: TypeaheadSource<T>,
 {
+    let result = provider.query(query);
     TypeaheadMatchSet {
         leader: provider.leader(),
         query: query.to_string(),
         token_start,
         cursor_pos,
-        loading: false,
-        matches: provider.query(query),
+        loading: result.loading,
+        show_loading: result.loading,
+        matches: result.matches,
+    }
+}
+
+fn stabilize_set_during_loading_delay<T: TypeaheadItem>(
+    previous_set: &mut Option<TypeaheadMatchSet<T>>,
+    set: &mut TypeaheadMatchSet<T>,
+) {
+    let delaying_loading = set.loading && !set.show_loading && set.matches.is_empty();
+    if delaying_loading
+        && let Some(previous) = previous_set.as_ref()
+        && previous.token_start == set.token_start
+    {
+        set.matches = previous.matches.clone();
+    }
+
+    if !set.loading || !set.matches.is_empty() {
+        *previous_set = Some(set.clone());
     }
 }
 
