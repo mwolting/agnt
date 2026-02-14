@@ -1,5 +1,4 @@
-pub(crate) const DEFAULT_READ_LIMIT: usize = 500;
-pub(crate) const MAX_READ_LIMIT: usize = 2_000;
+pub(crate) const MAX_READ_LIMIT: usize = 20_000;
 const HASH_PREFIX_LEN: usize = 4;
 
 pub(crate) struct FileLines {

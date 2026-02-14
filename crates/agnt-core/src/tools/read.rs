@@ -1,7 +1,7 @@
 use agnt_llm::{Describe, Property, Schema};
 use serde::Deserialize;
 
-use super::hashline::{DEFAULT_READ_LIMIT, FileLines, MAX_READ_LIMIT, hashline};
+use super::hashline::{FileLines, MAX_READ_LIMIT, hashline};
 use crate::event::{DisplayBody, ToolCallDisplay, ToolResultDisplay};
 use crate::tool::{Tool, ToolOutput};
 
@@ -41,7 +41,7 @@ impl Describe for ReadInput {
                     name: "limit".into(),
                     schema: Schema::Integer {
                         description: Some(format!(
-                            "Maximum number of lines to return (default {DEFAULT_READ_LIMIT}, max {MAX_READ_LIMIT})"
+                            "Maximum number of lines to return. If omitted, reads through end of file. If provided, values above {MAX_READ_LIMIT} are clamped."
                         )),
                     },
                 },
@@ -119,14 +119,15 @@ impl Tool for ReadTool {
         let lines = FileLines::parse(&content).lines;
         let total_lines = lines.len();
         let offset = input.offset.unwrap_or(0).min(total_lines);
-        let requested_limit = input.limit.unwrap_or(DEFAULT_READ_LIMIT);
-        if requested_limit == 0 {
-            return Err(agnt_llm::Error::Other(
-                "limit must be at least 1".to_string(),
-            ));
-        }
-
-        let limit = requested_limit.min(MAX_READ_LIMIT);
+        let limit = match input.limit {
+            Some(0) => {
+                return Err(agnt_llm::Error::Other(
+                    "limit must be at least 1".to_string(),
+                ));
+            }
+            Some(requested_limit) => requested_limit.min(MAX_READ_LIMIT),
+            None => total_lines.saturating_sub(offset),
+        };
         let end = offset.saturating_add(limit).min(total_lines);
         let returned_lines = end.saturating_sub(offset);
         let has_more = end < total_lines;
@@ -151,7 +152,10 @@ impl Tool for ReadTool {
 
     fn render_input(&self, input: &ReadInput) -> ToolCallDisplay {
         let offset = input.offset.unwrap_or(0);
-        let limit = input.limit.unwrap_or(DEFAULT_READ_LIMIT);
+        let limit = input
+            .limit
+            .map(|limit| limit.to_string())
+            .unwrap_or_else(|| "all".to_string());
         ToolCallDisplay {
             title: format!("Read {} (offset {}, limit {})", input.path, offset, limit),
             body: None,

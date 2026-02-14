@@ -4,4 +4,4 @@ Returns hashline-formatted lines in `line:hash|content` format, where `line` is 
 
 Supports pagination:
 - `offset` is a 0-based line offset (default `0`)
-- `limit` is max lines to return (default `500`)
+- `limit` is max lines to return (optional; when omitted, reads through end of file; when provided, values above `20000` are clamped)

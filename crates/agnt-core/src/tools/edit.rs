@@ -200,7 +200,8 @@ pub struct EditOutput {
     pub path: String,
     pub deleted: bool,
     pub operations_applied: usize,
-    pub final_diff: String,
+    pub final_diff_for_llm: String,
+    pub final_diff_for_display: String,
 }
 
 impl ToolOutput for EditOutput {
@@ -219,12 +220,12 @@ impl ToolOutput for EditOutput {
             )
         };
 
-        if self.final_diff.is_empty() {
+        if self.final_diff_for_llm.is_empty() {
             summary
         } else {
             format!(
                 "{summary}\n\nfinal diff (hashline-formatted):\n{}",
-                self.final_diff
+                self.final_diff_for_llm
             )
         }
     }
@@ -275,7 +276,10 @@ impl Tool for EditTool {
         let deleted = state.file.is_none();
         let final_path = state.current_path.clone();
         let final_snapshot = snapshot_state(&state);
-        let final_diff = render_unified_patch(&initial_snapshot, &final_snapshot);
+        let final_diff_for_llm =
+            render_unified_patch(&initial_snapshot, &final_snapshot, DiffLineFormat::Hashline);
+        let final_diff_for_display =
+            render_unified_patch(&initial_snapshot, &final_snapshot, DiffLineFormat::Raw);
         state.persist().await?;
 
         Ok(EditOutput {
@@ -283,7 +287,8 @@ impl Tool for EditTool {
             path: final_path,
             deleted,
             operations_applied: input.operations.len(),
-            final_diff,
+            final_diff_for_llm,
+            final_diff_for_display,
         })
     }
 
@@ -313,7 +318,7 @@ impl Tool for EditTool {
             )
         };
 
-        let body = render_diff_body(&output.final_diff);
+        let body = render_diff_body(&output.final_diff_for_display);
         ToolResultDisplay { title, body }
     }
 }
@@ -415,7 +420,17 @@ fn render_diff_body(diff: &str) -> Option<DisplayBody> {
 // 5 lines of context means nearby hunks separated by <10 unchanged lines naturally coalesce.
 const HUNK_CONTEXT_LINES: usize = 5;
 
-fn render_unified_patch(before: &FileSnapshot, after: &FileSnapshot) -> String {
+#[derive(Copy, Clone)]
+enum DiffLineFormat {
+    Hashline,
+    Raw,
+}
+
+fn render_unified_patch(
+    before: &FileSnapshot,
+    after: &FileSnapshot,
+    line_format: DiffLineFormat,
+) -> String {
     let mut patch = String::new();
     patch.push_str(&format!(
         "--- {}\n",
@@ -463,21 +478,21 @@ fn render_unified_patch(before: &FileSnapshot, after: &FileSnapshot) -> String {
                     ChangeTag::Equal => {
                         if let Some(old_idx) = change.old_index() {
                             patch.push(' ');
-                            patch.push_str(&hashline(old_idx + 1, line));
+                            patch.push_str(&render_diff_line(old_idx + 1, line, line_format));
                             patch.push('\n');
                         }
                     }
                     ChangeTag::Delete => {
                         if let Some(old_idx) = change.old_index() {
                             patch.push('-');
-                            patch.push_str(&hashline(old_idx + 1, line));
+                            patch.push_str(&render_diff_line(old_idx + 1, line, line_format));
                             patch.push('\n');
                         }
                     }
                     ChangeTag::Insert => {
                         if let Some(new_idx) = change.new_index() {
                             patch.push('+');
-                            patch.push_str(&hashline(new_idx + 1, line));
+                            patch.push_str(&render_diff_line(new_idx + 1, line, line_format));
                             patch.push('\n');
                         }
                     }
@@ -495,6 +510,13 @@ fn hunk_start_line(start: usize, count: usize) -> usize {
 
 fn change_line_content(value: &str) -> &str {
     value.trim_end_matches('\n').trim_end_matches('\r')
+}
+
+fn render_diff_line(line_no: usize, line: &str, line_format: DiffLineFormat) -> String {
+    match line_format {
+        DiffLineFormat::Hashline => hashline(line_no, line),
+        DiffLineFormat::Raw => line.to_string(),
+    }
 }
 
 fn diff_label(prefix: &str, path: &str, exists: bool) -> String {
