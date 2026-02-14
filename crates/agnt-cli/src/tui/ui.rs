@@ -4,7 +4,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, AppState, Role, StreamChunk};
+use crate::tui::app::{App, AppState, Role, StreamChunk};
+use crate::tui::typeahead::ActiveTypeahead;
+use crate::typeahead::{TypeaheadItem, TypeaheadMatchSet};
 
 const USER_COLOR: Color = Color::Cyan;
 const ASSISTANT_COLOR: Color = Color::Green;
@@ -12,21 +14,28 @@ const REASONING_STYLE: Style = Style::new()
     .fg(Color::DarkGray)
     .add_modifier(Modifier::ITALIC);
 const DIM: Style = Style::new().fg(Color::DarkGray);
+const TYPEAHEAD_HEADER: Style = Style::new().fg(Color::Yellow);
+const TYPEAHEAD_ACTIVE: Style = Style::new().fg(Color::Yellow);
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
 
+    let typeahead = app.typeahead_matches();
+    let selected_index = app.typeahead_selected_index();
+    let typeahead_height = calculate_typeahead_height(typeahead.as_ref());
     let input_height = calculate_input_height(app, area.width);
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(1), // separator
+        Constraint::Length(typeahead_height),
         Constraint::Length(input_height),
     ])
     .split(area);
 
     render_messages(frame, app, chunks[0]);
     render_separator(frame, chunks[1]);
-    render_input(frame, app, chunks[2]);
+    render_typeahead(frame, typeahead.as_ref(), selected_index, chunks[2]);
+    render_input(frame, app, chunks[3]);
 }
 
 /// Manually wrap a styled line to fit within `width` columns.
@@ -266,6 +275,26 @@ fn render_separator(frame: &mut Frame, area: ratatui::layout::Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+fn render_typeahead(
+    frame: &mut Frame,
+    active: Option<&ActiveTypeahead>,
+    selected_index: usize,
+    area: ratatui::layout::Rect,
+) {
+    if area.height == 0 {
+        return;
+    }
+
+    let Some(active) = active else {
+        return;
+    };
+
+    match active {
+        ActiveTypeahead::Command(set) => render_match_set(frame, set, selected_index, area),
+        ActiveTypeahead::Mention(set) => render_match_set(frame, set, selected_index, area),
+    }
+}
+
 fn render_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let input_text = if app.input.is_empty() && matches!(app.state, AppState::Idle) {
         Text::from(Span::styled("> Type a message...", DIM))
@@ -293,6 +322,76 @@ fn render_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let (cursor_row, cursor_col) = cursor_position(&app.input, app.cursor_pos, inner_width);
     frame.set_cursor_position((area.x + 2 + cursor_col as u16, area.y + cursor_row as u16));
+}
+
+fn calculate_typeahead_height(active: Option<&ActiveTypeahead>) -> u16 {
+    let Some(active) = active else {
+        return 0;
+    };
+
+    let match_count = match active {
+        ActiveTypeahead::Command(set) => set.matches.len(),
+        ActiveTypeahead::Mention(set) => set.matches.len(),
+    };
+
+    // Header + up to 4 matches.
+    if match_count == 0 {
+        2
+    } else {
+        (1 + match_count.min(4)) as u16
+    }
+}
+
+fn render_match_set<T: TypeaheadItem>(
+    frame: &mut Frame,
+    set: &TypeaheadMatchSet<T>,
+    selected_index: usize,
+    area: ratatui::layout::Rect,
+) {
+    let header = if set.query.is_empty() {
+        "Suggestions".to_string()
+    } else {
+        format!("Suggestions for `{}`", set.query)
+    };
+    let mut lines = vec![Line::from(Span::styled(header, TYPEAHEAD_HEADER))];
+
+    let max_items = area.height.saturating_sub(1) as usize;
+    if set.matches.is_empty() {
+        let status = if set.loading {
+            if set.query.is_empty() {
+                "  indexing files..."
+            } else {
+                "  searching..."
+            }
+        } else {
+            "  no matches"
+        };
+        lines.push(Line::from(Span::styled(status, DIM)));
+    } else {
+        for (index, item) in set.matches.iter().take(max_items).enumerate() {
+            let marker = if index == selected_index {
+                "› "
+            } else {
+                "  "
+            };
+            let token = item.token_text();
+            let token_style = if index == selected_index {
+                TYPEAHEAD_ACTIVE
+            } else {
+                Style::default()
+            };
+
+            let mut spans = vec![Span::styled(marker, DIM), Span::styled(token, token_style)];
+
+            if let Some(description) = item.description() {
+                spans.push(Span::styled(format!("  {description}"), DIM));
+            }
+
+            lines.push(Line::from(spans));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 fn calculate_input_height(app: &App, width: u16) -> u16 {

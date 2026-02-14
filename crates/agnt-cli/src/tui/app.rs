@@ -1,8 +1,10 @@
-use agnt_core::{Agent, AgentEvent, AgentStream};
+use agnt_core::{Agent, AgentEvent, AgentStream, ConversationState};
 use agnt_llm::{AssistantPart, Message, UserPart};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::session::SharedSessionStore;
+use crate::tui::typeahead::{ActiveTypeahead, TypeaheadActivation, TypeaheadState};
+use crate::typeahead::{Command, Mention};
 
 // ---------------------------------------------------------------------------
 // Display messages (what the UI renders)
@@ -56,6 +58,7 @@ pub struct App {
     pub cursor_blink_on: bool,
     /// Maximum scroll offset (set by the renderer each frame).
     pub max_scroll: u16,
+    typeahead: TypeaheadState,
 }
 
 impl App {
@@ -72,6 +75,7 @@ impl App {
             should_quit: false,
             cursor_blink_on: true,
             max_scroll: 0,
+            typeahead: TypeaheadState::new_for_current_project(),
         }
     }
 
@@ -96,6 +100,13 @@ impl App {
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
             {
+                if let Some(activation) = self
+                    .typeahead
+                    .activate_selected(&self.input, self.cursor_pos)
+                {
+                    self.apply_typeahead_activation(activation);
+                    return true;
+                }
                 if matches!(self.state, AppState::Idle) && !self.input.trim().is_empty() {
                     self.submit();
                 }
@@ -117,6 +128,8 @@ impl App {
                 if matches!(self.state, AppState::Generating { .. }) {
                     self.finalize_response();
                     self.state = AppState::Idle;
+                } else {
+                    self.typeahead.dismiss(&self.input, self.cursor_pos);
                 }
                 true
             }
@@ -124,39 +137,56 @@ impl App {
             // Text input
             KeyCode::Char(c) => {
                 self.insert_char(c);
+                self.typeahead.sync(&self.input, self.cursor_pos);
                 true
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
+                    self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
                     self.input.remove(self.cursor_pos);
+                    self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
+                    self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
                     self.cursor_pos += 1;
+                    self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Home => {
                 self.cursor_pos = 0;
+                self.typeahead.sync(&self.input, self.cursor_pos);
                 true
             }
             KeyCode::End => {
                 self.cursor_pos = self.input.len();
+                self.typeahead.sync(&self.input, self.cursor_pos);
+                true
+            }
+            KeyCode::Up => {
+                self.typeahead
+                    .move_selection(-1, &self.input, self.cursor_pos);
+                true
+            }
+            KeyCode::Down => {
+                self.typeahead
+                    .move_selection(1, &self.input, self.cursor_pos);
                 true
             }
 
@@ -194,6 +224,7 @@ impl App {
                 // Clear input now that the message is recorded in history
                 self.input.clear();
                 self.cursor_pos = 0;
+                self.typeahead.sync(&self.input, self.cursor_pos);
                 self.messages.push(DisplayMessage {
                     role: Role::User,
                     chunks: vec![StreamChunk::Text(content)],
@@ -272,6 +303,78 @@ impl App {
     fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
+    }
+
+    pub fn typeahead_matches(&mut self) -> Option<ActiveTypeahead> {
+        self.typeahead.visible_matches(&self.input, self.cursor_pos)
+    }
+
+    pub fn typeahead_selected_index(&self) -> usize {
+        self.typeahead.selected_index()
+    }
+
+    pub fn should_poll_typeahead(&self) -> bool {
+        self.typeahead
+            .has_background_work(&self.input, self.cursor_pos)
+    }
+
+    fn apply_typeahead_activation(&mut self, activation: TypeaheadActivation) {
+        match activation {
+            TypeaheadActivation::Mention {
+                mention,
+                token_start,
+                token_end,
+            } => self.apply_mention(mention, token_start, token_end),
+            TypeaheadActivation::Command { command, .. } => self.run_command(command),
+        }
+    }
+
+    fn apply_mention(&mut self, mention: Mention, token_start: usize, token_end: usize) {
+        let mention_text = match mention {
+            Mention::File(path) => path.to_string_lossy().replace('\\', "/"),
+        };
+        let replacement = format!("{mention_text} ");
+        self.input
+            .replace_range(token_start..token_end, &replacement);
+        self.cursor_pos = token_start + replacement.len();
+        self.typeahead.sync(&self.input, self.cursor_pos);
+    }
+
+    fn run_command(&mut self, command: Command) {
+        match command {
+            Command::NewSession => self.start_new_session(),
+        }
+    }
+
+    fn start_new_session(&mut self) {
+        if matches!(self.state, AppState::Generating { .. }) {
+            self.finalize_response();
+            self.state = AppState::Idle;
+        }
+
+        match self
+            .session_store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .create_session(None)
+        {
+            Ok(_) => {
+                self.agent.restore_conversation_state(ConversationState {
+                    messages: Vec::new(),
+                });
+                self.messages.clear();
+                self.stream_chunks.clear();
+                self.input.clear();
+                self.cursor_pos = 0;
+                self.scroll_offset = 0;
+                self.max_scroll = 0;
+                self.typeahead.sync(&self.input, self.cursor_pos);
+            }
+            Err(err) => {
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[session error: {err}]")));
+            }
+        }
     }
 }
 

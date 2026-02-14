@@ -1,34 +1,27 @@
-mod app;
 mod gui;
 mod session;
-mod ui;
+mod tui;
+mod typeahead;
 
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agnt_auth::AuthManager;
 use agnt_db::Session;
 use agnt_llm_registry::{AuthMethod, OAuthPkceAuth, Registry};
-use app::{App, AppState};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::{Html, IntoResponse};
 use axum::{Router, routing::get};
 use clap::{Parser, Subcommand};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::StreamExt;
 use url::Url;
 
 use crate::session::{SessionStore, SharedSessionStore};
+use crate::tui::app::App;
 
 const DEFAULT_PROVIDER_ID: &str = agnt_llm_codex::PROVIDER_ID;
 const DEFAULT_MODEL_ID: &str = agnt_llm_codex::DEFAULT_MODEL_ID;
@@ -46,10 +39,13 @@ struct Cli {
     providers: bool,
 }
 
-#[derive(Clone, Copy, Subcommand)]
+#[derive(Clone, Subcommand)]
 enum Command {
     /// Start the terminal UI (default).
-    Tui,
+    Tui {
+        /// Run the TUI from this working directory.
+        cwd: Option<PathBuf>,
+    },
     /// Start the desktop GUI.
     Gui,
     /// List known providers and their models.
@@ -69,19 +65,19 @@ impl Cli {
             return Mode::Providers;
         }
 
-        match self.command.unwrap_or(Command::Tui) {
-            Command::Tui => Mode::Tui,
-            Command::Gui => Mode::Gui,
-            Command::Providers => Mode::Providers,
+        match &self.command {
+            Some(Command::Tui { .. }) | None => Mode::Tui,
+            Some(Command::Gui) => Mode::Gui,
+            Some(Command::Providers) => Mode::Providers,
         }
     }
-}
 
-/// Restore the terminal to its original state. Called on normal exit and
-/// from the panic hook.
-fn restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    fn tui_cwd(&self) -> Option<&PathBuf> {
+        match &self.command {
+            Some(Command::Tui { cwd }) => cwd.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 #[tokio::main]
@@ -95,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // panic message, so the user isn't left with a broken terminal.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
+        tui::restore_terminal();
         default_hook(info);
     }));
 
@@ -112,6 +108,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if mode == Mode::Tui
+        && let Some(cwd) = cli.tui_cwd()
+    {
+        std::env::set_current_dir(cwd)?;
+    }
+
     let cwd = std::env::current_dir()?;
     let mut session_store = SessionStore::open_for_project_root(&cwd)?;
     let existing_sessions = session_store.list_sessions(100)?;
@@ -122,13 +124,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if mode == Mode::Gui {
         ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
         let agent = build_default_agent(&mut registry, restored_state)?;
-        tokio::task::block_in_place(|| {
-            gui::run(agent, session_store);
-        });
+        gui::launch(agent, session_store);
         return Ok(());
     }
 
-    run_tui(&mut registry, &auth_manager, session_store, restored_state).await
+    ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
+    let agent = build_default_agent(&mut registry, restored_state)?;
+    let mut app = App::new(agent, session_store);
+    tui::launch(&mut app).await
 }
 
 fn print_providers(registry: &Registry) {
@@ -225,35 +228,6 @@ fn session_label(session: &Session) -> String {
     format!("Session {}", session.id)
 }
 
-async fn run_tui(
-    registry: &mut Registry,
-    auth_manager: &Arc<AuthManager>,
-    session_store: SharedSessionStore,
-    restored_state: Option<agnt_core::ConversationState>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_provider_credentials(registry, auth_manager, DEFAULT_PROVIDER_ID).await?;
-    let agent = build_default_agent(registry, restored_state)?;
-
-    let mut app = App::new(agent, session_store);
-
-    // Terminal setup
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
-
-    // Event stream from crossterm
-    let mut events = EventStream::new();
-
-    // Main loop
-    let result = run(&mut terminal, &mut app, &mut events).await;
-
-    // Restore terminal
-    restore_terminal();
-
-    result
-}
-
 fn build_default_agent(
     registry: &mut Registry,
     restored_state: Option<agnt_core::ConversationState>,
@@ -273,61 +247,6 @@ fn build_default_agent(
     }
 
     Ok(agent)
-}
-
-async fn run(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-    events: &mut EventStream,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut blink_interval = tokio::time::interval(std::time::Duration::from_millis(530));
-    blink_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        // Draw
-        terminal.draw(|frame| ui::render(frame, app))?;
-
-        if app.should_quit {
-            break;
-        }
-
-        // Wait for input, agent events, or blink tick
-        tokio::select! {
-            // Terminal events (keyboard, resize)
-            Some(Ok(event)) = events.next() => {
-                match event {
-                    Event::Key(key) => {
-                        app.handle_key(key);
-                    }
-                    Event::Mouse(mouse) => {
-                        app.handle_mouse(mouse);
-                    }
-                    Event::Resize(_, _) => {
-                        // Redraw handled by next loop iteration
-                    }
-                    _ => {}
-                }
-            }
-
-            // Agent stream events (only when generating)
-            Some(agent_event) = async {
-                match &mut app.state {
-                    AppState::Generating { stream } => stream.next().await,
-                    AppState::Idle => std::future::pending().await,
-                }
-            } => {
-                app.handle_agent_event(agent_event);
-            }
-
-            // Cursor blink tick (only matters during generation)
-            _ = blink_interval.tick() => {
-                if matches!(app.state, AppState::Generating { .. }) {
-                    app.toggle_cursor_blink();
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn ensure_provider_credentials(

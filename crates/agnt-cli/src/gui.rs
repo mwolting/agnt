@@ -16,8 +16,8 @@ use gpui_component::{
     v_flex,
 };
 
-use crate::app::{DisplayMessage, Role, StreamChunk, display_messages_from_history};
 use crate::session::SharedSessionStore;
+use crate::tui::app::{DisplayMessage, Role, StreamChunk, display_messages_from_history};
 
 #[derive(Clone, Copy)]
 enum ThreadBlockKind {
@@ -622,5 +622,11 @@ pub fn run(agent: Agent, session_store: SharedSessionStore) {
         {
             cx.quit();
         }
+    });
+}
+
+pub fn launch(agent: Agent, session_store: SharedSessionStore) {
+    tokio::task::block_in_place(|| {
+        run(agent, session_store);
     });
 }
