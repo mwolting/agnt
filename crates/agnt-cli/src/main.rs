@@ -38,6 +38,10 @@ struct Cli {
     // Backward-compatible alias for `agnt providers`.
     #[arg(long, hide = true)]
     providers: bool,
+
+    /// Resume the most recently active session for the current project.
+    #[arg(long, global = true)]
+    resume: bool,
 }
 
 #[derive(Clone, Subcommand)]
@@ -83,6 +87,10 @@ impl Cli {
             _ => None,
         }
     }
+
+    fn should_resume_session(&self) -> bool {
+        self.resume && matches!(self.mode(), Mode::Tui | Mode::Gui)
+    }
 }
 
 #[tokio::main]
@@ -126,15 +134,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_store = SessionStore::open_for_project_root(Arc::clone(&store), &cwd)?;
     let session_store: SharedSessionStore = Arc::new(Mutex::new(session_store));
 
+    let mut restored_state = if cli.should_resume_session() {
+        session_store.lock().resume_most_recent_session()?
+    } else {
+        None
+    };
+
     if mode == Mode::Gui {
         ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
-        let agent = build_default_agent(&mut registry, None)?;
+        let agent = build_default_agent(&mut registry, restored_state.take())?;
         gui::launch(agent, session_store);
         return Ok(());
     }
 
     ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
-    let agent = build_default_agent(&mut registry, None)?;
+    let agent = build_default_agent(&mut registry, restored_state.take())?;
     let mut app = App::new(agent, session_store);
     tui::launch(&mut app).await
 }

@@ -228,6 +228,39 @@ impl Sessions<'_> {
         collect_rows(iter)
     }
 
+    pub fn set_session_title_if_missing(&mut self, session_id: &str, title: &str) -> Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(());
+        }
+
+        let now = now_ms();
+        let tx = self.db.conn.transaction()?;
+
+        ensure_session_exists(&tx, session_id)?;
+
+        let changed = tx.execute(
+            "UPDATE sessions
+             SET title = ?2, updated_at_ms = ?3
+             WHERE id = ?1
+               AND (title IS NULL OR trim(title) = '')",
+            params![session_id, title, now],
+        )?;
+
+        if changed > 0 {
+            insert_session_op(
+                &tx,
+                session_id,
+                "session.title_set",
+                &json!({ "title": title }),
+                now,
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn append_turn(&mut self, input: AppendTurnInput) -> Result<Turn> {
         let now = now_ms();
         let tx = self.db.conn.transaction()?;

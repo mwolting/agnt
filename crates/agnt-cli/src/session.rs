@@ -4,11 +4,13 @@ use std::sync::Arc;
 use agnt_core::{Agent, ConversationState};
 use agnt_db::{AppendTurnInput, CreateSessionInput, Session, Store};
 use agnt_llm::stream::Usage;
-use agnt_llm::{AssistantPart, Message};
+use agnt_llm::{AssistantPart, Message, UserPart};
 use parking_lot::Mutex;
 use serde_json::Value;
 
 pub type SharedSessionStore = Arc<Mutex<SessionStore>>;
+
+const SESSION_TITLE_MAX_CHARS: usize = 80;
 
 pub struct SessionStore {
     store: Arc<Mutex<Store>>,
@@ -94,6 +96,26 @@ impl SessionStore {
         self.load_active_conversation_state()
     }
 
+    pub fn resume_most_recent_session(
+        &mut self,
+    ) -> Result<Option<ConversationState>, Box<dyn std::error::Error>> {
+        let latest_session_id = {
+            let mut db = self.store.lock();
+            db.sessions()
+                .list_sessions_for_project(&self.project_id, 1)?
+                .into_iter()
+                .next()
+                .map(|session| session.id)
+        };
+
+        let Some(session_id) = latest_session_id else {
+            return Ok(None);
+        };
+
+        self.active_session_id = Some(session_id);
+        self.load_active_conversation_state()
+    }
+
     pub fn load_active_conversation_state(
         &mut self,
     ) -> Result<Option<ConversationState>, Box<dyn std::error::Error>> {
@@ -124,16 +146,23 @@ impl SessionStore {
 
         let snapshot = agent.conversation_state();
         let (user_parts, assistant_parts) = extract_latest_turn_parts(&snapshot.messages)?;
+        let session_title = derive_session_title(&snapshot.messages);
 
         let mut db = self.store.lock();
         db.sessions().append_turn(AppendTurnInput {
-            session_id,
+            session_id: session_id.clone(),
             parent_turn_id: None,
             user_parts,
             assistant_parts,
             conversation_state: serde_json::to_value(&snapshot)?,
             usage: Some(serde_json::to_value(usage)?),
         })?;
+
+        if let Some(title) = session_title.as_deref() {
+            db.sessions()
+                .set_session_title_if_missing(&session_id, title)?;
+        }
+
         Ok(())
     }
 }
@@ -169,4 +198,43 @@ fn extract_latest_turn_parts(
     }
 
     Ok((user_parts, serde_json::to_value(assistant_parts)?))
+}
+
+fn derive_session_title(messages: &[Message]) -> Option<String> {
+    let first_user_parts = messages.iter().find_map(|message| match message {
+        Message::User { parts } => Some(parts),
+        _ => None,
+    })?;
+
+    let title_text = first_user_parts
+        .iter()
+        .filter_map(|part| match part {
+            UserPart::Text(text) => Some(text.text.trim()),
+            UserPart::Image(_) => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if title_text.is_empty() {
+        return None;
+    }
+
+    let normalized = title_text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(truncate_with_ellipsis(&normalized, SESSION_TITLE_MAX_CHARS))
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+
+    let mut truncated = input.chars().take(max_chars).collect::<String>();
+    truncated.push('…');
+    truncated
 }
