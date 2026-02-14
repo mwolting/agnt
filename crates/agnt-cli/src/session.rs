@@ -1,10 +1,11 @@
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agnt_core::{Agent, ConversationState};
 use agnt_db::{AppendTurnInput, CreateSessionInput, Session, SessionDb};
 use agnt_llm::stream::Usage;
 use agnt_llm::{AssistantPart, Message};
+use parking_lot::Mutex;
 use serde_json::Value;
 
 pub type SharedSessionStore = Arc<Mutex<SessionStore>>;
@@ -32,6 +33,14 @@ impl SessionStore {
         Ok(self.db.list_sessions_for_project(&self.project_id, limit)?)
     }
 
+    pub fn active_session_id(&self) -> Option<&str> {
+        self.active_session_id.as_deref()
+    }
+
+    pub fn clear_active_session(&mut self) {
+        self.active_session_id = None;
+    }
+
     pub fn create_session(
         &mut self,
         title: Option<String>,
@@ -42,6 +51,13 @@ impl SessionStore {
         })?;
         self.active_session_id = Some(session.id.clone());
         Ok(session)
+    }
+
+    pub fn ensure_active_session(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.active_session_id.is_none() {
+            self.create_session(None)?;
+        }
+        Ok(())
     }
 
     pub fn activate_session(
@@ -100,6 +116,13 @@ impl SessionStore {
         })?;
         Ok(())
     }
+}
+
+pub fn session_label(session: &Session) -> String {
+    if let Some(title) = &session.title {
+        return format!("{title} ({})", session.id);
+    }
+    format!("Session {}", session.id)
 }
 
 fn extract_latest_turn_parts(

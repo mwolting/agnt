@@ -23,7 +23,10 @@ use crate::session::SharedSessionStore;
 use crate::tui::app::{DisplayMessage, Role, StreamChunk, display_messages_from_history};
 use crate::typeahead::{Command, Mention, TypeaheadActivation};
 
+mod session_dialog;
 mod typeahead;
+use session_dialog::ResumeDialogState;
+use session_dialog::{build_dialog_entries, move_selection, selected_session_id};
 use typeahead::GuiTypeahead;
 
 #[derive(Clone, Copy)]
@@ -58,6 +61,7 @@ struct AgntGui {
     generating: bool,
     cursor_blink_on: bool,
     stick_to_bottom: bool,
+    resume_dialog: Option<ResumeDialogState>,
     stream_task: Task<()>,
     _blink_task: Task<()>,
     _typeahead_updates_task: Task<()>,
@@ -146,6 +150,7 @@ impl AgntGui {
             generating: false,
             cursor_blink_on: true,
             stick_to_bottom: true,
+            resume_dialog: None,
             stream_task: Task::ready(()),
             _blink_task: blink_task,
             _typeahead_updates_task: typeahead_updates_task,
@@ -208,6 +213,12 @@ impl AgntGui {
             return;
         }
 
+        if self.resume_dialog.is_some() {
+            self.confirm_resume_selection(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+
         let (input, cursor_pos) = self.input_snapshot(cx);
         if let Some(activation) = self.typeahead.activate_selected(&input, cursor_pos) {
             self.apply_typeahead_activation(activation, window, cx);
@@ -222,6 +233,13 @@ impl AgntGui {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.resume_dialog.is_some() {
+            self.resume_dialog = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let (input, cursor_pos) = self.input_snapshot(cx);
         if self.typeahead.dismiss_if_visible(&input, cursor_pos) {
             cx.stop_propagation();
@@ -235,6 +253,13 @@ impl AgntGui {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(dialog) = self.resume_dialog.as_mut() {
+            move_selection(dialog, -1);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let (input, cursor_pos) = self.input_snapshot(cx);
         if self.typeahead.move_if_visible(-1, &input, cursor_pos) {
             cx.stop_propagation();
@@ -248,6 +273,13 @@ impl AgntGui {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(dialog) = self.resume_dialog.as_mut() {
+            move_selection(dialog, 1);
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
         let (input, cursor_pos) = self.input_snapshot(cx);
         if self.typeahead.move_if_visible(1, &input, cursor_pos) {
             cx.stop_propagation();
@@ -291,13 +323,23 @@ impl AgntGui {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.generating {
+        if self.generating || self.resume_dialog.is_some() {
             return;
         }
 
         let text = state.read(cx).value();
         let text = text.trim().to_string();
         if text.is_empty() {
+            return;
+        }
+
+        let ensure_session_result = self.session_store.lock().ensure_active_session();
+        if let Err(err) = ensure_session_result {
+            self.stream_chunks
+                .push(StreamChunk::Tool(format!("[session error: {err}]")));
+            self.stream_markdown_states.push(None);
+            self.maybe_auto_scroll_to_bottom();
+            cx.notify();
             return;
         }
 
@@ -402,7 +444,6 @@ impl AgntGui {
                 if let Err(err) = self
                     .session_store
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .persist_turn_from_agent(&self.agent, &usage)
                 {
                     self.stream_chunks
@@ -477,6 +518,7 @@ impl AgntGui {
     fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
         match command {
             Command::NewSession => self.start_new_session(window, cx),
+            Command::ResumeSession => self.open_resume_dialog(cx),
         }
     }
 
@@ -486,26 +528,42 @@ impl AgntGui {
             self.generating = false;
         }
 
-        let create_session_result = {
-            let mut store = self
-                .session_store
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            store.create_session(None)
+        self.session_store.lock().clear_active_session();
+        self.restore_active_session_state(None, window, cx);
+
+        self.maybe_auto_scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn open_resume_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.generating {
+            self.finalize_response();
+            self.generating = false;
+        }
+
+        let (active_session_id, sessions_result) = {
+            let store = self.session_store.lock();
+            (
+                store.active_session_id().map(str::to_owned),
+                store.list_sessions(100),
+            )
         };
 
-        match create_session_result {
-            Ok(_) => {
-                self.agent.restore_conversation_state(ConversationState {
-                    messages: Vec::new(),
-                });
-                self.messages.clear();
-                self.message_markdown_states.clear();
-                self.stream_chunks.clear();
-                self.stream_markdown_states.clear();
-                self.cursor_blink_on = true;
-                self.stick_to_bottom = true;
-                self.set_input_text_and_cursor(String::new(), 0, window, cx);
+        match sessions_result {
+            Ok(mut sessions) => {
+                if let Some(active_session_id) = active_session_id {
+                    sessions.retain(|session| session.id != active_session_id);
+                }
+
+                if sessions.is_empty() {
+                    self.stream_chunks.push(StreamChunk::Tool(
+                        "[no previous sessions to resume]".to_string(),
+                    ));
+                    self.stream_markdown_states.push(None);
+                } else {
+                    self.resume_dialog =
+                        Some(ResumeDialogState::new(build_dialog_entries(sessions)));
+                }
             }
             Err(err) => {
                 self.stream_chunks
@@ -516,6 +574,48 @@ impl AgntGui {
 
         self.maybe_auto_scroll_to_bottom();
         cx.notify();
+    }
+
+    fn confirm_resume_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.resume_dialog.take() else {
+            return;
+        };
+        let Some(session_id) = selected_session_id(&dialog).map(str::to_owned) else {
+            return;
+        };
+
+        let activate_result = self.session_store.lock().activate_session(&session_id);
+        match activate_result {
+            Ok(restored_state) => self.restore_active_session_state(restored_state, window, cx),
+            Err(err) => {
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[session error: {err}]")));
+                self.stream_markdown_states.push(None);
+            }
+        }
+
+        self.maybe_auto_scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn restore_active_session_state(
+        &mut self,
+        restored_state: Option<ConversationState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.agent
+            .restore_conversation_state(restored_state.unwrap_or_else(|| ConversationState {
+                messages: Vec::new(),
+            }));
+        self.messages = display_messages_from_history(&self.agent.messages());
+        self.message_markdown_states = Self::build_markdown_states(&self.messages, cx);
+        self.stream_chunks.clear();
+        self.stream_markdown_states.clear();
+        self.cursor_blink_on = true;
+        self.stick_to_bottom = true;
+        self.resume_dialog = None;
+        self.set_input_text_and_cursor(String::new(), 0, window, cx);
     }
 
     fn input_snapshot(&self, cx: &Context<Self>) -> (String, usize) {
@@ -540,8 +640,70 @@ impl AgntGui {
     }
 
     fn render_typeahead_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.resume_dialog.is_some() {
+            return None;
+        }
+
         let (input, cursor_pos) = self.input_snapshot(cx);
         self.typeahead.render_panel(&input, cursor_pos, cx)
+    }
+
+    fn render_resume_dialog_panel(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let dialog = self.resume_dialog.as_ref()?;
+        let max_items = 8usize;
+        let start = if dialog.selected_index >= max_items {
+            dialog.selected_index + 1 - max_items
+        } else {
+            0
+        };
+        let end = (start + max_items).min(dialog.entries.len());
+
+        let mut panel = v_flex()
+            .w_full()
+            .gap_1()
+            .p_2()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted)
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Resume session"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Enter to resume, Esc to cancel"),
+            );
+
+        for idx in start..end {
+            let entry = &dialog.entries[idx];
+            let marker = if idx == dialog.selected_index {
+                "› "
+            } else {
+                "  "
+            };
+            let mut row = div()
+                .w_full()
+                .h_5()
+                .px_1()
+                .flex()
+                .items_center()
+                .text_sm()
+                .child(format!("{marker}{}", entry.label));
+            if idx == dialog.selected_index {
+                row = row.text_color(cx.theme().cyan);
+            } else {
+                row = row.text_color(cx.theme().foreground);
+            }
+            panel = panel.child(row);
+        }
+
+        Some(panel.into_any_element())
     }
 
     fn build_thread_blocks(&self) -> Vec<ThreadBlock> {
@@ -734,6 +896,7 @@ impl Render for AgntGui {
         self.maybe_auto_scroll_to_bottom();
 
         let blocks = self.build_thread_blocks();
+        let resume_dialog_panel = self.render_resume_dialog_panel(cx);
         let typeahead_panel = self.render_typeahead_panel(cx);
         let send_label = if self.generating {
             "Generating..."
@@ -762,20 +925,14 @@ impl Render for AgntGui {
                     ),
             )
             .into_any_element();
-        let input_section = if let Some(panel) = typeahead_panel {
-            v_flex()
-                .w_full()
-                .gap_2()
-                .child(panel)
-                .child(input_row)
-                .into_any_element()
-        } else {
-            v_flex()
-                .w_full()
-                .gap_2()
-                .child(input_row)
-                .into_any_element()
-        };
+        let mut input_section = v_flex().w_full().gap_2();
+        if let Some(panel) = resume_dialog_panel {
+            input_section = input_section.child(panel);
+        }
+        if let Some(panel) = typeahead_panel {
+            input_section = input_section.child(panel);
+        }
+        let input_section = input_section.child(input_row).into_any_element();
 
         v_flex()
             .size_full()

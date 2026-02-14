@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::tui::app::{App, AppState, Role, StreamChunk};
+use crate::tui::session_dialog;
 use crate::typeahead::{
     ActiveTypeahead, TypeaheadItem, TypeaheadMatchSet, TypeaheadWindowItem,
     build_typeahead_window_items,
@@ -45,6 +46,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         chunks[2],
     );
     render_input(frame, app, chunks[3]);
+    session_dialog::render(frame, app.resume_dialog.as_ref(), area);
 }
 
 /// Manually wrap a styled line to fit within `width` columns.

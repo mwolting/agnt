@@ -1,4 +1,5 @@
 pub mod app;
+pub mod session_dialog;
 pub mod ui;
 
 use std::io;

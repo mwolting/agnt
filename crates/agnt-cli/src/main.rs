@@ -6,17 +6,17 @@ mod typeahead;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use agnt_auth::AuthManager;
-use agnt_db::Session;
 use agnt_llm_registry::{AuthMethod, OAuthPkceAuth, Registry};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri};
 use axum::response::{Html, IntoResponse};
 use axum::{Router, routing::get};
 use clap::{Parser, Subcommand};
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
@@ -119,21 +119,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cwd = std::env::current_dir()?;
-    let mut session_store = SessionStore::open_for_project_root(&cwd)?;
-    let existing_sessions = session_store.list_sessions(100)?;
-    let selected_session = select_startup_session(mode, &existing_sessions)?;
-    let restored_state = activate_selected_session(&mut session_store, selected_session)?;
+    let session_store = SessionStore::open_for_project_root(&cwd)?;
     let session_store: SharedSessionStore = Arc::new(Mutex::new(session_store));
 
     if mode == Mode::Gui {
         ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
-        let agent = build_default_agent(&mut registry, restored_state)?;
+        let agent = build_default_agent(&mut registry, None)?;
         gui::launch(agent, session_store);
         return Ok(());
     }
 
     ensure_provider_credentials(&registry, &auth_manager, DEFAULT_PROVIDER_ID).await?;
-    let agent = build_default_agent(&mut registry, restored_state)?;
+    let agent = build_default_agent(&mut registry, None)?;
     let mut app = App::new(agent, session_store);
     tui::launch(&mut app).await
 }
@@ -161,75 +158,6 @@ fn print_providers(registry: &Registry) {
             println!("  {:<30} {}", model.id, name);
         }
     }
-}
-
-enum StartupSessionChoice {
-    Existing { session_id: String },
-    New,
-}
-
-fn select_startup_session(
-    mode: Mode,
-    existing_sessions: &[Session],
-) -> Result<StartupSessionChoice, Box<dyn std::error::Error>> {
-    if existing_sessions.is_empty() {
-        return Ok(StartupSessionChoice::New);
-    }
-
-    println!(
-        "Found {} existing session(s). Select one to continue or create a new session:",
-        existing_sessions.len()
-    );
-    for (idx, session) in existing_sessions.iter().enumerate() {
-        let label = session_label(session);
-        println!("  {}. {}", idx + 1, label);
-    }
-    println!("  n. Create new session");
-    if mode == Mode::Gui {
-        println!("  q. Quit");
-    }
-
-    loop {
-        let input = prompt_line("Selection: ")?;
-        let normalized = input.trim().to_lowercase();
-
-        if normalized == "n" {
-            return Ok(StartupSessionChoice::New);
-        }
-        if mode == Mode::Gui && normalized == "q" {
-            std::process::exit(0);
-        }
-
-        if let Ok(n) = normalized.parse::<usize>()
-            && n >= 1
-            && n <= existing_sessions.len()
-        {
-            let session_id = existing_sessions[n - 1].id.clone();
-            return Ok(StartupSessionChoice::Existing { session_id });
-        }
-
-        println!("Invalid selection.");
-    }
-}
-
-fn activate_selected_session(
-    store: &mut SessionStore,
-    choice: StartupSessionChoice,
-) -> Result<Option<agnt_core::ConversationState>, Box<dyn std::error::Error>> {
-    match choice {
-        StartupSessionChoice::Existing { session_id } => store.activate_session(&session_id),
-        StartupSessionChoice::New => {
-            store.create_session(None)?;
-            Ok(None)
-        }
-    }
-}
-
-fn session_label(session: &Session) -> String {
-    if let Some(title) = &session.title {
-        return format!("{title} ({})", session.id);
-    }
-    format!("Session {}", session.id)
 }
 
 fn build_default_agent(

@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agnt_llm::stream::{FinishReason, StreamEvent, Usage};
 use agnt_llm::{LanguageModel, Message, RequestBuilder, ToolDefinition};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
@@ -72,7 +73,7 @@ impl Agent {
         agent.system(system_prompt(&cwd, &workspace_root));
 
         {
-            let mut s = agent.state.lock().unwrap();
+            let mut s = agent.state.lock();
             s.agents_md = agents_md;
         }
 
@@ -113,13 +114,13 @@ impl Agent {
 
     /// Register a tool the model can call.
     pub fn tool(&mut self, tool: impl Tool) -> &mut Self {
-        self.state.lock().unwrap().tools.push(Box::new(tool));
+        self.state.lock().tools.push(Box::new(tool));
         self
     }
 
     /// Access the conversation history (completed messages only).
     pub fn messages(&self) -> Vec<Message> {
-        self.state.lock().unwrap().messages.clone()
+        self.state.lock().messages.clone()
     }
 
     /// Snapshot conversation state that can be persisted and later restored.
@@ -131,7 +132,7 @@ impl Agent {
 
     /// Replace in-memory conversation state with a previously saved snapshot.
     pub fn restore_conversation_state(&self, state: ConversationState) {
-        self.state.lock().unwrap().messages = state.messages;
+        self.state.lock().messages = state.messages;
     }
 
     /// Submit user input and get back a stream of events.
@@ -191,7 +192,7 @@ async fn generation_loop(
 ) {
     // 1. Record user message and inject AGENTS.md once on first turn.
     {
-        let mut s = state.lock().unwrap();
+        let mut s = state.lock();
         if s.messages.is_empty()
             && let Some(agents_md) = s.agents_md.take()
         {
@@ -217,7 +218,7 @@ async fn generation_loop(
     loop {
         // Build request from current state
         let request = {
-            let s = state.lock().unwrap();
+            let s = state.lock();
             let mut req = agnt_llm::request();
             if let Some(ref system) = system_prompt {
                 req.system(system.as_str());
@@ -340,7 +341,7 @@ async fn generation_loop(
 
         // Record the assistant message with parts in arrival order
         {
-            let mut s = state.lock().unwrap();
+            let mut s = state.lock();
             if !parts.is_empty() {
                 s.messages.push(Message::Assistant { parts });
             }
@@ -361,7 +362,7 @@ async fn generation_loop(
             // Prepare the tool call (parse args, render input) while holding
             // the lock, then drop the lock before awaiting.
             let prepared = {
-                let s = state.lock().unwrap();
+                let s = state.lock();
                 let tool = s.tools.iter().find(|t| t.definition().name == tc.name);
                 match tool {
                     Some(t) => t.prepare(&tc.arguments),
@@ -374,7 +375,7 @@ async fn generation_loop(
                 Ok(prepared) => {
                     let input_display = prepared.input_display.clone();
                     {
-                        let mut s = state.lock().unwrap();
+                        let mut s = state.lock();
                         set_tool_call_display_start(
                             &mut s.messages,
                             &tc.id,
@@ -399,7 +400,7 @@ async fn generation_loop(
                         Ok(result) => {
                             let output_display = result.output_display.clone();
                             {
-                                let mut s = state.lock().unwrap();
+                                let mut s = state.lock();
                                 set_tool_call_display_result(
                                     &mut s.messages,
                                     &tc.id,
@@ -421,7 +422,7 @@ async fn generation_loop(
 
                             // Add LLM-formatted result to conversation history.
                             {
-                                let mut s = state.lock().unwrap();
+                                let mut s = state.lock();
                                 s.messages
                                     .push(Message::tool_result(&tc.id, &result.llm_output));
                             }
@@ -433,7 +434,7 @@ async fn generation_loop(
                                 body: Some(crate::event::DisplayBody::Text(error_text.clone())),
                             };
                             {
-                                let mut s = state.lock().unwrap();
+                                let mut s = state.lock();
                                 set_tool_call_display_result(
                                     &mut s.messages,
                                     &tc.id,
@@ -455,7 +456,7 @@ async fn generation_loop(
                             // Errors also go into conversation history so the
                             // model can see what went wrong.
                             {
-                                let mut s = state.lock().unwrap();
+                                let mut s = state.lock();
                                 s.messages.push(Message::tool_result(&tc.id, &error_text));
                             }
                         }
@@ -469,7 +470,7 @@ async fn generation_loop(
                         body: Some(crate::event::DisplayBody::Text(error_text.clone())),
                     };
                     {
-                        let mut s = state.lock().unwrap();
+                        let mut s = state.lock();
                         set_tool_call_display_result(
                             &mut s.messages,
                             &tc.id,
@@ -489,7 +490,7 @@ async fn generation_loop(
                     }
 
                     {
-                        let mut s = state.lock().unwrap();
+                        let mut s = state.lock();
                         s.messages.push(Message::tool_result(&tc.id, &error_text));
                     }
                 }

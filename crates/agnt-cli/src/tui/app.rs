@@ -4,6 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use tokio::sync::watch;
 
 use crate::session::SharedSessionStore;
+use crate::tui::session_dialog::{self, ResumeSessionDialogState};
 use crate::typeahead::{ActiveTypeahead, Command, Mention, TypeaheadActivation, TypeaheadState};
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,7 @@ pub struct App {
     pub cursor_blink_on: bool,
     /// Maximum scroll offset (set by the renderer each frame).
     pub max_scroll: u16,
+    pub resume_dialog: Option<ResumeSessionDialogState>,
     typeahead: TypeaheadState,
 }
 
@@ -75,6 +77,7 @@ impl App {
             should_quit: false,
             cursor_blink_on: true,
             max_scroll: 0,
+            resume_dialog: None,
             typeahead: TypeaheadState::new_for_current_project(),
         }
     }
@@ -93,6 +96,8 @@ impl App {
                 }
                 true
             }
+
+            _ if self.resume_dialog.is_some() => self.handle_resume_dialog_key(key),
 
             // Submit
             KeyCode::Enter
@@ -206,6 +211,10 @@ impl App {
 
     /// Handle a mouse event.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.resume_dialog.is_some() {
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.scroll_offset = self.scroll_offset.saturating_add(3).min(self.max_scroll);
@@ -260,7 +269,6 @@ impl App {
                 if let Err(err) = self
                     .session_store
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .persist_turn_from_agent(&self.agent, &usage)
                 {
                     self.stream_chunks
@@ -279,6 +287,13 @@ impl App {
     }
 
     fn submit(&mut self) {
+        let ensure_session_result = self.session_store.lock().ensure_active_session();
+        if let Err(err) = ensure_session_result {
+            self.stream_chunks
+                .push(StreamChunk::Tool(format!("[session error: {err}]")));
+            return;
+        }
+
         let text = self.input.trim().to_string();
         self.stream_chunks.clear();
         // Input stays visible until UserMessage event confirms it's in history
@@ -306,6 +321,9 @@ impl App {
     }
 
     pub fn typeahead_matches(&mut self) -> Option<ActiveTypeahead> {
+        if self.resume_dialog.is_some() {
+            return None;
+        }
         self.typeahead.visible_matches(&self.input, self.cursor_pos)
     }
 
@@ -350,6 +368,7 @@ impl App {
     fn run_command(&mut self, command: Command) {
         match command {
             Command::NewSession => self.start_new_session(),
+            Command::ResumeSession => self.open_resume_dialog(),
         }
     }
 
@@ -359,29 +378,114 @@ impl App {
             self.state = AppState::Idle;
         }
 
-        match self
-            .session_store
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .create_session(None)
-        {
-            Ok(_) => {
-                self.agent.restore_conversation_state(ConversationState {
-                    messages: Vec::new(),
-                });
-                self.messages.clear();
-                self.stream_chunks.clear();
-                self.input.clear();
-                self.cursor_pos = 0;
-                self.scroll_offset = 0;
-                self.max_scroll = 0;
-                self.typeahead.sync(&self.input, self.cursor_pos);
+        self.session_store.lock().clear_active_session();
+        self.restore_active_session_state(None);
+    }
+
+    fn open_resume_dialog(&mut self) {
+        if matches!(self.state, AppState::Generating { .. }) {
+            self.finalize_response();
+            self.state = AppState::Idle;
+        }
+
+        let (active_session_id, sessions_result) = {
+            let store = self.session_store.lock();
+            (
+                store.active_session_id().map(str::to_owned),
+                store.list_sessions(100),
+            )
+        };
+
+        match sessions_result {
+            Ok(mut sessions) => {
+                if let Some(active_session_id) = active_session_id {
+                    sessions.retain(|session| session.id != active_session_id);
+                }
+
+                if sessions.is_empty() {
+                    self.stream_chunks.push(StreamChunk::Tool(
+                        "[no previous sessions to resume]".to_string(),
+                    ));
+                    return;
+                }
+
+                self.resume_dialog = Some(ResumeSessionDialogState::new(
+                    session_dialog::build_dialog_entries(sessions),
+                ));
             }
             Err(err) => {
                 self.stream_chunks
                     .push(StreamChunk::Tool(format!("[session error: {err}]")));
             }
         }
+    }
+
+    fn handle_resume_dialog_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.resume_dialog = None;
+                true
+            }
+            KeyCode::Up => {
+                self.move_resume_dialog_selection(-1);
+                true
+            }
+            KeyCode::Down => {
+                self.move_resume_dialog_selection(1);
+                true
+            }
+            KeyCode::Enter
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                self.confirm_resume_dialog_selection();
+                true
+            }
+            _ => true,
+        }
+    }
+
+    fn move_resume_dialog_selection(&mut self, direction: i32) {
+        let Some(dialog) = self.resume_dialog.as_mut() else {
+            return;
+        };
+        session_dialog::move_selection(dialog, direction);
+    }
+
+    fn confirm_resume_dialog_selection(&mut self) {
+        let Some(dialog) = self.resume_dialog.take() else {
+            return;
+        };
+        let Some(session_id) = session_dialog::selected_session_id(&dialog).map(str::to_owned)
+        else {
+            return;
+        };
+
+        let activate_result = self.session_store.lock().activate_session(&session_id);
+
+        match activate_result {
+            Ok(restored_state) => self.restore_active_session_state(restored_state),
+            Err(err) => {
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[session error: {err}]")));
+            }
+        }
+    }
+
+    fn restore_active_session_state(&mut self, restored_state: Option<ConversationState>) {
+        self.agent
+            .restore_conversation_state(restored_state.unwrap_or_else(|| ConversationState {
+                messages: Vec::new(),
+            }));
+        self.messages = display_messages_from_history(&self.agent.messages());
+        self.stream_chunks.clear();
+        self.input.clear();
+        self.cursor_pos = 0;
+        self.scroll_offset = 0;
+        self.max_scroll = 0;
+        self.resume_dialog = None;
+        self.typeahead.sync(&self.input, self.cursor_pos);
     }
 }
 

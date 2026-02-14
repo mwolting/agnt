@@ -120,7 +120,8 @@ impl TypeaheadState {
     }
 
     pub fn new(project_root: PathBuf) -> Self {
-        let command_source: CachedPrefixSource<Command> = vec![Command::NewSession].into();
+        let command_source: CachedPrefixSource<Command> =
+            vec![Command::NewSession, Command::ResumeSession].into();
         let command_typeahead = TypeaheadProvider::new('/', command_source);
         let mention_typeahead = TypeaheadProvider::new('@', FileMentionSource::new(project_root));
 

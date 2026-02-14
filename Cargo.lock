@@ -44,6 +44,7 @@ dependencies = [
  "agnt-llm-registry",
  "base64",
  "keyring",
+ "parking_lot",
  "rand 0.10.0",
  "reqwest",
  "serde",
@@ -72,6 +73,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "ignore",
+ "parking_lot",
  "ratatui",
  "rpassword",
  "serde_json",
@@ -87,6 +89,7 @@ version = "0.1.0"
 dependencies = [
  "agnt-llm",
  "futures",
+ "parking_lot",
  "serde",
  "serde_json",
  "serde_yaml",

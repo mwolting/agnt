@@ -1,10 +1,11 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agnt_llm_registry::{
     ApiKeyAuth, AuthMethod, AuthRequest, AuthResolver, OAuthPkceAuth, ResolvedAuth,
 };
+use parking_lot::Mutex;
 
 use crate::error::Error;
 use crate::oauth::{
@@ -158,17 +159,12 @@ impl AuthManager {
     }
 
     fn cache_get(&self, provider_id: &str) -> Option<StoredCredential> {
-        self.cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(provider_id)
-            .cloned()
+        self.cache.lock().get(provider_id).cloned()
     }
 
     fn cache_set(&self, provider_id: &str, credential: StoredCredential) {
         self.cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(provider_id.to_string(), credential);
     }
 }

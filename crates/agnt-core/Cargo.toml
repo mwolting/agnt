@@ -15,3 +15,4 @@ tokio = { version = "1", features = ["sync", "rt", "process"] }
 tokio-stream = "0.1"
 futures = "0.3"
 serde_yaml = "0.9.34"
+parking_lot = "0.12.5"
