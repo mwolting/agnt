@@ -41,12 +41,14 @@ dependencies = [
 name = "agnt-auth"
 version = "0.1.0"
 dependencies = [
+ "agnt-db",
  "agnt-llm-registry",
  "base64",
  "keyring",
  "parking_lot",
  "rand 0.10.0",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

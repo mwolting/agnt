@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use agnt_db::Store;
 use agnt_llm_registry::{
     ApiKeyAuth, AuthMethod, AuthRequest, AuthResolver, OAuthPkceAuth, ResolvedAuth,
 };
@@ -12,18 +13,18 @@ use crate::oauth::{
     OAuthCredential, OAuthStart, begin_pkce, exchange_authorization_code, extract_code_from_input,
     refresh_pkce_token,
 };
-use crate::store::{KeyringStore, StoredCredential};
+use crate::store::{CredentialStore, StoredCredential};
 
-/// Headless auth manager (keyring + oauth/api-key resolution/persistence).
+/// Headless auth manager (db-backed credential persistence + oauth/api-key resolution).
 pub struct AuthManager {
-    store: KeyringStore,
+    store: CredentialStore,
     cache: Mutex<HashMap<String, StoredCredential>>,
 }
 
 impl AuthManager {
-    pub fn new(service_name: impl Into<String>) -> Self {
+    pub fn new(service_name: impl Into<String>, store: Arc<Mutex<Store>>) -> Self {
         Self {
-            store: KeyringStore::new(service_name),
+            store: CredentialStore::new(service_name, store),
             cache: Mutex::new(HashMap::new()),
         }
     }

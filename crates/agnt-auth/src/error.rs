@@ -12,6 +12,9 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("db error: {0}")]
+    Db(#[from] agnt_db::Error),
+
     #[error("unsupported auth method: {0}")]
     UnsupportedAuthMethod(String),
 

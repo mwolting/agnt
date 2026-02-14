@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agnt_core::{Agent, ConversationState};
-use agnt_db::{AppendTurnInput, CreateSessionInput, Session, SessionDb};
+use agnt_db::{AppendTurnInput, CreateSessionInput, Session, Store};
 use agnt_llm::stream::Usage;
 use agnt_llm::{AssistantPart, Message};
 use parking_lot::Mutex;
@@ -11,26 +11,33 @@ use serde_json::Value;
 pub type SharedSessionStore = Arc<Mutex<SessionStore>>;
 
 pub struct SessionStore {
-    db: SessionDb,
+    store: Arc<Mutex<Store>>,
     project_id: String,
     active_session_id: Option<String>,
 }
 
 impl SessionStore {
-    pub fn open_for_project_root(project_root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let db_path = agnt_app::session_db_path()?;
-        let mut db = SessionDb::open(db_path)?;
-        let project = db.upsert_project(project_root, None)?;
+    pub fn open_for_project_root(
+        store: Arc<Mutex<Store>>,
+        project_root: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let project = {
+            let mut db = store.lock();
+            db.sessions().upsert_project(project_root, None)?
+        };
 
         Ok(Self {
-            db,
+            store,
             project_id: project.id,
             active_session_id: None,
         })
     }
 
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<Session>, Box<dyn std::error::Error>> {
-        Ok(self.db.list_sessions_for_project(&self.project_id, limit)?)
+        let mut db = self.store.lock();
+        Ok(db
+            .sessions()
+            .list_sessions_for_project(&self.project_id, limit)?)
     }
 
     pub fn active_session_id(&self) -> Option<&str> {
@@ -45,10 +52,14 @@ impl SessionStore {
         &mut self,
         title: Option<String>,
     ) -> Result<Session, Box<dyn std::error::Error>> {
-        let session = self.db.create_session(CreateSessionInput {
-            project_id: self.project_id.clone(),
-            title,
-        })?;
+        let session = {
+            let mut db = self.store.lock();
+            db.sessions().create_session(CreateSessionInput {
+                project_id: self.project_id.clone(),
+                title,
+            })?
+        };
+
         self.active_session_id = Some(session.id.clone());
         Ok(session)
     }
@@ -64,10 +75,13 @@ impl SessionStore {
         &mut self,
         session_id: &str,
     ) -> Result<Option<ConversationState>, Box<dyn std::error::Error>> {
-        let session = self
-            .db
-            .get_session(session_id)?
-            .ok_or_else(|| format!("session not found: {session_id}"))?;
+        let session = {
+            let mut db = self.store.lock();
+            db.sessions()
+                .get_session(session_id)?
+                .ok_or_else(|| format!("session not found: {session_id}"))?
+        };
+
         if session.project_id != self.project_id {
             return Err(format!(
                 "session '{session_id}' does not belong to project '{}'",
@@ -87,7 +101,12 @@ impl SessionStore {
             return Ok(None);
         };
 
-        let Some(turn) = self.db.current_turn(session_id)? else {
+        let turn = {
+            let mut db = self.store.lock();
+            db.sessions().current_turn(session_id)?
+        };
+
+        let Some(turn) = turn else {
             return Ok(None);
         };
 
@@ -106,7 +125,8 @@ impl SessionStore {
         let snapshot = agent.conversation_state();
         let (user_parts, assistant_parts) = extract_latest_turn_parts(&snapshot.messages)?;
 
-        self.db.append_turn(AppendTurnInput {
+        let mut db = self.store.lock();
+        db.sessions().append_turn(AppendTurnInput {
             session_id,
             parent_turn_id: None,
             user_parts,

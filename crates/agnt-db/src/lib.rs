@@ -1,10 +1,13 @@
-mod error;
+mod database;
+pub mod error;
 mod migration;
-mod models;
-mod store;
+pub mod provider_credentials;
+pub mod sessions;
+pub mod store;
 
 pub use error::{Error, Result};
-pub use models::{
-    AppendTurnInput, CreateSessionInput, Project, Session, SessionOp, Turn, TurnPathItem,
+pub use provider_credentials::{ProviderCredential, ProviderCredentials};
+pub use sessions::{
+    AppendTurnInput, CreateSessionInput, Project, Session, SessionOp, Sessions, Turn, TurnPathItem,
 };
-pub use store::SessionDb;
+pub use store::Store;

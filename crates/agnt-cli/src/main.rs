@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agnt_auth::AuthManager;
+use agnt_db::Store;
 use agnt_llm_registry::{AuthMethod, OAuthPkceAuth, Registry};
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri};
@@ -99,8 +100,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         default_hook(info);
     }));
 
+    let db_path = agnt_app::session_db_path()?;
+    let store = Arc::new(Mutex::new(Store::open(db_path)?));
+
     // Set up auth + registry.
-    let auth_manager = Arc::new(AuthManager::new("agnt"));
+    let auth_manager = Arc::new(AuthManager::new("agnt", Arc::clone(&store)));
     let mut registry = Registry::new();
     registry.set_auth_resolver(auth_manager.resolver());
     agnt_llm_openai::register(&mut registry);
@@ -119,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let cwd = std::env::current_dir()?;
-    let session_store = SessionStore::open_for_project_root(&cwd)?;
+    let session_store = SessionStore::open_for_project_root(Arc::clone(&store), &cwd)?;
     let session_store: SharedSessionStore = Arc::new(Mutex::new(session_store));
 
     if mode == Mode::Gui {
