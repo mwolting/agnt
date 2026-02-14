@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use agnt_core::{Agent, AgentEvent};
+use agnt_core::{Agent, AgentEvent, ConversationState};
 use gpui::{
     AnyElement, App as GpuiApp, AppContext, ClickEvent, Context, Entity, InteractiveElement as _,
     IntoElement, KeyBinding, ParentElement, Pixels, Render, ScrollHandle, ScrollWheelEvent,
@@ -10,7 +10,10 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, Root, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Enter as InputEnter, Input, InputEvent, InputState},
+    input::{
+        Enter as InputEnter, Escape as InputEscape, Input, InputEvent, InputState,
+        MoveDown as InputMoveDown, MoveUp as InputMoveUp, Position,
+    },
     scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
     v_flex,
@@ -18,6 +21,10 @@ use gpui_component::{
 
 use crate::session::SharedSessionStore;
 use crate::tui::app::{DisplayMessage, Role, StreamChunk, display_messages_from_history};
+use crate::typeahead::{Command, Mention, TypeaheadActivation};
+
+mod typeahead;
+use typeahead::GuiTypeahead;
 
 #[derive(Clone, Copy)]
 enum ThreadBlockKind {
@@ -42,6 +49,7 @@ struct AgntGui {
     agent: Agent,
     session_store: SharedSessionStore,
     input: Entity<InputState>,
+    typeahead: GuiTypeahead,
     thread_scroll: ScrollHandle,
     messages: Vec<DisplayMessage>,
     message_markdown_states: Vec<Vec<Option<Entity<TextViewState>>>>,
@@ -52,6 +60,7 @@ struct AgntGui {
     stick_to_bottom: bool,
     stream_task: Task<()>,
     _blink_task: Task<()>,
+    _typeahead_updates_task: Task<()>,
     _input_subscription: Subscription,
 }
 
@@ -64,6 +73,8 @@ impl AgntGui {
     ) -> Self {
         let messages = display_messages_from_history(&agent.messages());
         let message_markdown_states = Self::build_markdown_states(&messages, cx);
+        let typeahead = GuiTypeahead::new_for_current_project();
+        let [mut command_typeahead_updates, mut mention_typeahead_updates] = typeahead.updates();
 
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -91,6 +102,34 @@ impl AgntGui {
                 }
             }
         });
+        let typeahead_updates_task = cx.spawn_in(window, async move |this, window| {
+            let mut command_updates_open = true;
+            let mut mention_updates_open = true;
+            loop {
+                tokio::select! {
+                    result = command_typeahead_updates.changed(), if command_updates_open => {
+                        if result.is_err() {
+                            command_updates_open = false;
+                        }
+                    }
+                    result = mention_typeahead_updates.changed(), if mention_updates_open => {
+                        if result.is_err() {
+                            mention_updates_open = false;
+                        }
+                    }
+                    else => break,
+                }
+
+                if this
+                    .update_in(window, |_, _, cx| {
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
 
         input.update(cx, |input, cx| input.focus(window, cx));
 
@@ -98,6 +137,7 @@ impl AgntGui {
             agent,
             session_store,
             input,
+            typeahead,
             thread_scroll: ScrollHandle::new(),
             messages,
             message_markdown_states,
@@ -108,6 +148,7 @@ impl AgntGui {
             stick_to_bottom: true,
             stream_task: Task::ready(()),
             _blink_task: blink_task,
+            _typeahead_updates_task: typeahead_updates_task,
             _input_subscription: input_subscription,
         }
     }
@@ -155,6 +196,63 @@ impl AgntGui {
     fn on_send_click(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.input.clone();
         self.submit_from_input(&state, window, cx);
+    }
+
+    fn on_typeahead_enter_capture(
+        &mut self,
+        action: &InputEnter,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if action.secondary {
+            return;
+        }
+
+        let (input, cursor_pos) = self.input_snapshot(cx);
+        if let Some(activation) = self.typeahead.activate_selected(&input, cursor_pos) {
+            self.apply_typeahead_activation(activation, window, cx);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn on_typeahead_escape_capture(
+        &mut self,
+        _: &InputEscape,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (input, cursor_pos) = self.input_snapshot(cx);
+        if self.typeahead.dismiss_if_visible(&input, cursor_pos) {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn on_typeahead_up_capture(
+        &mut self,
+        _: &InputMoveUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (input, cursor_pos) = self.input_snapshot(cx);
+        if self.typeahead.move_if_visible(-1, &input, cursor_pos) {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn on_typeahead_down_capture(
+        &mut self,
+        _: &InputMoveDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (input, cursor_pos) = self.input_snapshot(cx);
+        if self.typeahead.move_if_visible(1, &input, cursor_pos) {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     fn on_thread_scroll(
@@ -337,6 +435,113 @@ impl AgntGui {
             });
             self.message_markdown_states.push(states);
         }
+    }
+
+    fn apply_typeahead_activation(
+        &mut self,
+        activation: TypeaheadActivation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match activation {
+            TypeaheadActivation::Mention {
+                mention,
+                token_start,
+                token_end,
+            } => self.apply_mention(mention, token_start, token_end, window, cx),
+            TypeaheadActivation::Command { command, .. } => self.run_command(command, window, cx),
+        }
+    }
+
+    fn apply_mention(
+        &mut self,
+        mention: Mention,
+        token_start: usize,
+        token_end: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mention_text = match mention {
+            Mention::File(path) => path.to_string_lossy().replace('\\', "/"),
+        };
+        let replacement = format!("{mention_text} ");
+        let (mut input, _) = self.input_snapshot(cx);
+        if token_start > token_end || token_end > input.len() {
+            return;
+        }
+        input.replace_range(token_start..token_end, &replacement);
+        let cursor_pos = token_start + replacement.len();
+        self.set_input_text_and_cursor(input, cursor_pos, window, cx);
+    }
+
+    fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        match command {
+            Command::NewSession => self.start_new_session(window, cx),
+        }
+    }
+
+    fn start_new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.generating {
+            self.finalize_response();
+            self.generating = false;
+        }
+
+        let create_session_result = {
+            let mut store = self
+                .session_store
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            store.create_session(None)
+        };
+
+        match create_session_result {
+            Ok(_) => {
+                self.agent.restore_conversation_state(ConversationState {
+                    messages: Vec::new(),
+                });
+                self.messages.clear();
+                self.message_markdown_states.clear();
+                self.stream_chunks.clear();
+                self.stream_markdown_states.clear();
+                self.cursor_blink_on = true;
+                self.stick_to_bottom = true;
+                self.set_input_text_and_cursor(String::new(), 0, window, cx);
+            }
+            Err(err) => {
+                self.stream_chunks
+                    .push(StreamChunk::Tool(format!("[session error: {err}]")));
+                self.stream_markdown_states.push(None);
+            }
+        }
+
+        self.maybe_auto_scroll_to_bottom();
+        cx.notify();
+    }
+
+    fn input_snapshot(&self, cx: &Context<Self>) -> (String, usize) {
+        let input = self.input.read(cx);
+        (input.value().to_string(), input.cursor())
+    }
+
+    fn set_input_text_and_cursor(
+        &mut self,
+        text: String,
+        cursor_pos: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cursor_pos = cursor_pos.min(text.len());
+        let position = byte_offset_to_position(&text, cursor_pos);
+        self.input.update(cx, |input, cx| {
+            input.set_value(text.clone(), window, cx);
+            input.set_cursor_position(position, window, cx);
+            input.focus(window, cx);
+        });
+    }
+
+    fn render_typeahead_panel(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (input, cursor_pos) = self.input_snapshot(cx);
+        self.typeahead.render_panel(&input, cursor_pos, cx)
     }
 
     fn build_thread_blocks(&self) -> Vec<ThreadBlock> {
@@ -529,10 +734,47 @@ impl Render for AgntGui {
         self.maybe_auto_scroll_to_bottom();
 
         let blocks = self.build_thread_blocks();
+        let typeahead_panel = self.render_typeahead_panel(cx);
         let send_label = if self.generating {
             "Generating..."
         } else {
             "Send"
+        };
+        let input_row = div()
+            .w_full()
+            .capture_action(cx.listener(Self::on_typeahead_enter_capture))
+            .capture_action(cx.listener(Self::on_typeahead_escape_capture))
+            .capture_action(cx.listener(Self::on_typeahead_up_capture))
+            .capture_action(cx.listener(Self::on_typeahead_down_capture))
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_end()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.input)))
+                    .child(
+                        Button::new("send")
+                            .primary()
+                            .large()
+                            .label(send_label)
+                            .disabled(self.generating)
+                            .on_click(cx.listener(Self::on_send_click)),
+                    ),
+            )
+            .into_any_element();
+        let input_section = if let Some(panel) = typeahead_panel {
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(panel)
+                .child(input_row)
+                .into_any_element()
+        } else {
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(input_row)
+                .into_any_element()
         };
 
         v_flex()
@@ -568,21 +810,7 @@ impl Render for AgntGui {
                     )
                     .vertical_scrollbar(&self.thread_scroll),
             )
-            .child(
-                h_flex()
-                    .w_full()
-                    .items_end()
-                    .gap_2()
-                    .child(div().flex_1().child(Input::new(&self.input)))
-                    .child(
-                        Button::new("send")
-                            .primary()
-                            .large()
-                            .label(send_label)
-                            .disabled(self.generating)
-                            .on_click(cx.listener(Self::on_send_click)),
-                    ),
-            )
+            .child(input_section)
     }
 }
 
@@ -629,4 +857,19 @@ pub fn launch(agent: Agent, session_store: SharedSessionStore) {
     tokio::task::block_in_place(|| {
         run(agent, session_store);
     });
+}
+
+fn byte_offset_to_position(text: &str, byte_offset: usize) -> Position {
+    let mut line = 0u32;
+    let mut character = 0u32;
+    for ch in text[..byte_offset.min(text.len())].chars() {
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += 1;
+        }
+    }
+
+    Position::new(line, character)
 }

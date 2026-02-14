@@ -4,8 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 use tokio::sync::watch;
 
 use crate::session::SharedSessionStore;
-use crate::tui::typeahead::{ActiveTypeahead, TypeaheadActivation, TypeaheadState};
-use crate::typeahead::{Command, Mention};
+use crate::typeahead::{ActiveTypeahead, Command, Mention, TypeaheadActivation, TypeaheadState};
 
 // ---------------------------------------------------------------------------
 // Display messages (what the UI renders)
@@ -312,6 +311,10 @@ impl App {
 
     pub fn typeahead_selected_index(&self) -> usize {
         self.typeahead.selected_index()
+    }
+
+    pub fn typeahead_window_start(&self) -> usize {
+        self.typeahead.window_start()
     }
 
     pub fn typeahead_updates(&self) -> [watch::Receiver<u64>; 2] {

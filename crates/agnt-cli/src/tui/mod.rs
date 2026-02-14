@@ -1,5 +1,4 @@
 pub mod app;
-pub mod typeahead;
 pub mod ui;
 
 use std::io;

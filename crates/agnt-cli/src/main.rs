@@ -47,7 +47,10 @@ enum Command {
         cwd: Option<PathBuf>,
     },
     /// Start the desktop GUI.
-    Gui,
+    Gui {
+        /// Run the GUI from this working directory.
+        cwd: Option<PathBuf>,
+    },
     /// List known providers and their models.
     Providers,
 }
@@ -67,14 +70,15 @@ impl Cli {
 
         match &self.command {
             Some(Command::Tui { .. }) | None => Mode::Tui,
-            Some(Command::Gui) => Mode::Gui,
+            Some(Command::Gui { .. }) => Mode::Gui,
             Some(Command::Providers) => Mode::Providers,
         }
     }
 
-    fn tui_cwd(&self) -> Option<&PathBuf> {
+    fn ui_cwd(&self) -> Option<&PathBuf> {
         match &self.command {
             Some(Command::Tui { cwd }) => cwd.as_ref(),
+            Some(Command::Gui { cwd }) => cwd.as_ref(),
             _ => None,
         }
     }
@@ -108,8 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if mode == Mode::Tui
-        && let Some(cwd) = cli.tui_cwd()
+    if mode != Mode::Providers
+        && let Some(cwd) = cli.ui_cwd()
     {
         std::env::set_current_dir(cwd)?;
     }

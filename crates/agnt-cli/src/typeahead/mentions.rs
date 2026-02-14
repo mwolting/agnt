@@ -19,7 +19,7 @@ impl TypeaheadItem for Mention {
     }
 
     fn description(&self) -> Option<String> {
-        Some("File".to_string())
+        None
     }
 }
 

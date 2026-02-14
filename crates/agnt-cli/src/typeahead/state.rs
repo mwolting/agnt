@@ -59,6 +59,7 @@ pub enum TypeaheadActivation {
 
 pub struct TypeaheadState {
     selected_index: usize,
+    window_start: usize,
     command_typeahead: TypeaheadProvider<Command, CachedPrefixSource<Command>>,
     mention_typeahead: TypeaheadProvider<Mention, FileMentionSource>,
     last_presented_command: Option<TypeaheadMatchSet<Command>>,
@@ -78,6 +79,39 @@ struct LoadingIndicatorState {
 }
 
 const LOADING_TEXT_DELAY: Duration = Duration::from_millis(100);
+const VISIBLE_MATCH_LIMIT: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeaheadWindowItem {
+    Value(usize),
+    Divider,
+}
+
+pub fn build_typeahead_window_items(
+    match_count: usize,
+    window_start: usize,
+    window_slots: usize,
+) -> Vec<TypeaheadWindowItem> {
+    if match_count == 0 || window_slots == 0 {
+        return Vec::new();
+    }
+
+    let include_divider = match_count > window_slots;
+    let total_rows = match_count + usize::from(include_divider);
+    let start = window_start % total_rows;
+    let visible_rows = window_slots.min(total_rows);
+
+    (0..visible_rows)
+        .map(|offset| {
+            let row_index = (start + offset) % total_rows;
+            if include_divider && row_index == match_count {
+                TypeaheadWindowItem::Divider
+            } else {
+                TypeaheadWindowItem::Value(row_index)
+            }
+        })
+        .collect()
+}
 
 impl TypeaheadState {
     pub fn new_for_current_project() -> Self {
@@ -92,6 +126,7 @@ impl TypeaheadState {
 
         Self {
             selected_index: 0,
+            window_start: 0,
             command_typeahead,
             mention_typeahead,
             last_presented_command: None,
@@ -107,14 +142,20 @@ impl TypeaheadState {
         self.selected_index
     }
 
+    pub fn window_start(&self) -> usize {
+        self.window_start
+    }
+
     pub fn sync(&mut self, input: &str, cursor_pos: usize) {
         let current = current_trigger_token(input, cursor_pos);
         if current != self.last_trigger_token {
             if current.is_some() {
                 self.trigger_seq = self.trigger_seq.wrapping_add(1);
                 self.selected_index = 0;
+                self.window_start = 0;
             } else {
                 self.selected_index = 0;
+                self.window_start = 0;
                 self.suppressed_seq = None;
             }
             self.last_trigger_token = current;
@@ -160,6 +201,7 @@ impl TypeaheadState {
             } else if self.selected_index >= count {
                 self.selected_index = count - 1;
             }
+            self.normalize_window_for_count(count);
         }
 
         active
@@ -259,6 +301,8 @@ impl TypeaheadState {
         } else {
             self.selected_index += 1;
         }
+
+        self.update_window_for_move(direction, count);
     }
 
     pub fn activate_selected(
@@ -294,8 +338,49 @@ impl TypeaheadState {
             }
         };
         self.selected_index = 0;
+        self.window_start = 0;
         self.suppressed_seq = Some(self.trigger_seq);
         Some(activation)
+    }
+
+    fn normalize_window_for_count(&mut self, count: usize) {
+        if count == 0 {
+            self.window_start = 0;
+            return;
+        }
+
+        let total_rows = count + usize::from(count > VISIBLE_MATCH_LIMIT);
+        if total_rows <= VISIBLE_MATCH_LIMIT {
+            self.window_start = 0;
+            return;
+        }
+
+        self.window_start %= total_rows;
+        let mut guard = 0usize;
+        while !selected_is_visible(count, self.window_start, self.selected_index)
+            && guard < total_rows
+        {
+            self.window_start = (self.window_start + 1) % total_rows;
+            guard += 1;
+        }
+    }
+
+    fn update_window_for_move(&mut self, direction: i32, count: usize) {
+        let total_rows = count + usize::from(count > VISIBLE_MATCH_LIMIT);
+        if total_rows <= VISIBLE_MATCH_LIMIT {
+            self.window_start = 0;
+            return;
+        }
+
+        self.window_start %= total_rows;
+        let step = if direction < 0 { total_rows - 1 } else { 1 };
+        let mut guard = 0usize;
+        while !selected_is_visible(count, self.window_start, self.selected_index)
+            && guard < total_rows
+        {
+            self.window_start = (self.window_start + step) % total_rows;
+            guard += 1;
+        }
     }
 
     pub fn updates(&self) -> [watch::Receiver<u64>; 2] {
@@ -360,4 +445,10 @@ fn current_trigger_token(input: &str, cursor_pos: usize) -> Option<TriggerToken>
         }),
         _ => None,
     }
+}
+
+fn selected_is_visible(count: usize, window_start: usize, selected_index: usize) -> bool {
+    build_typeahead_window_items(count, window_start, VISIBLE_MATCH_LIMIT)
+        .into_iter()
+        .any(|row| matches!(row, TypeaheadWindowItem::Value(index) if index == selected_index))
 }
