@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::tui::app::{App, AppState, Role, StreamChunk};
 use crate::tui::session_dialog;
@@ -321,32 +321,53 @@ fn render_typeahead(
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let input_text = if app.input.is_empty() && matches!(app.state, AppState::Idle) {
-        Text::from(Span::styled("> Type a message...", DIM))
-    } else {
-        let mut lines: Vec<Line> = Vec::new();
-        for (i, text_line) in app.input.lines().enumerate() {
-            let prefix = if i == 0 { "> " } else { "  " };
-            lines.push(Line::from(vec![
-                Span::styled(prefix, Style::default().fg(Color::DarkGray)),
-                Span::raw(text_line.to_string()),
-            ]));
-        }
-        if lines.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "> ",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        Text::from(lines)
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // Render prompt marker in the first two columns.
+    let prompt_width = area.width.min(2);
+    if prompt_width > 0 {
+        let prompt = "> ";
+        let prompt_area = ratatui::layout::Rect {
+            x: area.x,
+            y: area.y,
+            width: prompt_width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(prompt, Style::default().fg(Color::DarkGray))),
+            prompt_area,
+        );
+    }
+
+    // Text is rendered in the remaining width, wrapped without trimming.
+    let text_area = ratatui::layout::Rect {
+        x: area.x.saturating_add(2),
+        y: area.y,
+        width: area.width.saturating_sub(2),
+        height: area.height,
     };
 
-    let input_widget = Paragraph::new(input_text);
-    frame.render_widget(input_widget, area);
+    if text_area.width > 0 {
+        let input_text = if app.input.is_empty() && matches!(app.state, AppState::Idle) {
+            Text::from(Span::styled("Type a message...", DIM))
+        } else {
+            Text::raw(app.input.as_str())
+        };
 
-    let inner_width = area.width.saturating_sub(2) as usize;
+        let input_widget = Paragraph::new(input_text).wrap(Wrap { trim: false });
+        frame.render_widget(input_widget, text_area);
+    }
+
+    let inner_width = text_area.width.max(1) as usize;
     let (cursor_row, cursor_col) = cursor_position(&app.input, app.cursor_pos, inner_width);
-    frame.set_cursor_position((area.x + 2 + cursor_col as u16, area.y + cursor_row as u16));
+    let max_row = area.height.saturating_sub(1) as usize;
+    let clamped_row = cursor_row.min(max_row) as u16;
+    let cursor_x = text_area
+        .x
+        .saturating_add(cursor_col.min(inner_width.saturating_sub(1)) as u16);
+    frame.set_cursor_position((cursor_x, area.y + clamped_row));
 }
 
 fn calculate_typeahead_height(active: Option<&ActiveTypeahead>) -> u16 {
@@ -454,7 +475,7 @@ fn calculate_input_height(app: &App, width: u16) -> u16 {
         1
     } else {
         app.input
-            .lines()
+            .split('\n')
             .map(|line| {
                 let len = line.len().max(1);
                 len.div_ceil(inner_width) as u16

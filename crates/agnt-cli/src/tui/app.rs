@@ -119,11 +119,7 @@ impl App {
             }
 
             // Newline in input
-            KeyCode::Enter
-                if key
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
-            {
+            KeyCode::Enter => {
                 self.insert_char('\n');
                 true
             }
@@ -139,6 +135,15 @@ impl App {
                 true
             }
 
+            // Readline-style cursor movement
+            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_cursor_to_line_start();
+                true
+            }
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_cursor_to_line_end();
+                true
+            }
             // Text input
             KeyCode::Char(c) => {
                 self.insert_char(c);
@@ -185,23 +190,31 @@ impl App {
                 true
             }
             KeyCode::Up => {
-                self.typeahead
-                    .move_selection(-1, &self.input, self.cursor_pos);
+                if self.typeahead_is_visible() {
+                    self.typeahead
+                        .move_selection(-1, &self.input, self.cursor_pos);
+                } else {
+                    self.move_cursor_up_one_line();
+                }
                 true
             }
             KeyCode::Down => {
-                self.typeahead
-                    .move_selection(1, &self.input, self.cursor_pos);
+                if self.typeahead_is_visible() {
+                    self.typeahead
+                        .move_selection(1, &self.input, self.cursor_pos);
+                } else {
+                    self.move_cursor_down_one_line();
+                }
                 true
             }
 
             // Scroll history
             KeyCode::PageUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(10).min(self.max_scroll);
+                self.scroll_by(10);
                 true
             }
             KeyCode::PageDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                self.scroll_by(-10);
                 true
             }
 
@@ -217,10 +230,10 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp => {
-                self.scroll_offset = self.scroll_offset.saturating_add(3).min(self.max_scroll);
+                self.scroll_by(3);
             }
             MouseEventKind::ScrollDown => {
-                self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                self.scroll_by(-3);
             }
             _ => {}
         }
@@ -317,6 +330,76 @@ impl App {
 
     pub fn toggle_cursor_blink(&mut self) {
         self.cursor_blink_on = !self.cursor_blink_on;
+    }
+
+    pub fn scroll_by(&mut self, delta: i32) {
+        if delta > 0 {
+            self.scroll_offset = self
+                .scroll_offset
+                .saturating_add(delta as u16)
+                .min(self.max_scroll);
+        } else if delta < 0 {
+            self.scroll_offset = self.scroll_offset.saturating_sub((-delta) as u16);
+        }
+    }
+
+    fn move_cursor_to_line_start(&mut self) {
+        let cursor = self.cursor_pos.min(self.input.len());
+        self.cursor_pos = self.input[..cursor].rfind('\n').map_or(0, |idx| idx + 1);
+        self.typeahead.sync(&self.input, self.cursor_pos);
+    }
+
+    fn typeahead_is_visible(&mut self) -> bool {
+        self.typeahead
+            .visible_matches(&self.input, self.cursor_pos)
+            .is_some()
+    }
+
+    fn move_cursor_up_one_line(&mut self) {
+        let cursor = self.cursor_pos.min(self.input.len());
+        let current_line_start = self.input[..cursor].rfind('\n').map_or(0, |idx| idx + 1);
+        if current_line_start == 0 {
+            return;
+        }
+
+        let column = self.input[current_line_start..cursor].chars().count();
+        let previous_line_end = current_line_start - 1;
+        let previous_line_start = self.input[..previous_line_end]
+            .rfind('\n')
+            .map_or(0, |idx| idx + 1);
+        let previous_line = &self.input[previous_line_start..previous_line_end];
+
+        self.cursor_pos = previous_line_start + byte_index_for_column(previous_line, column);
+        self.typeahead.sync(&self.input, self.cursor_pos);
+    }
+
+    fn move_cursor_down_one_line(&mut self) {
+        let cursor = self.cursor_pos.min(self.input.len());
+        let current_line_start = self.input[..cursor].rfind('\n').map_or(0, |idx| idx + 1);
+        let current_line_end = self.input[cursor..]
+            .find('\n')
+            .map_or(self.input.len(), |rel| cursor + rel);
+        if current_line_end >= self.input.len() {
+            return;
+        }
+
+        let column = self.input[current_line_start..cursor].chars().count();
+        let next_line_start = current_line_end + 1;
+        let next_line_end = self.input[next_line_start..]
+            .find('\n')
+            .map_or(self.input.len(), |rel| next_line_start + rel);
+        let next_line = &self.input[next_line_start..next_line_end];
+
+        self.cursor_pos = next_line_start + byte_index_for_column(next_line, column);
+        self.typeahead.sync(&self.input, self.cursor_pos);
+    }
+
+    fn move_cursor_to_line_end(&mut self) {
+        let cursor = self.cursor_pos.min(self.input.len());
+        self.cursor_pos = self.input[cursor..]
+            .find('\n')
+            .map_or(self.input.len(), |rel| cursor + rel);
+        self.typeahead.sync(&self.input, self.cursor_pos);
     }
 
     fn insert_char(&mut self, c: char) {
@@ -491,6 +574,12 @@ impl App {
         self.resume_dialog = None;
         self.typeahead.sync(&self.input, self.cursor_pos);
     }
+}
+
+fn byte_index_for_column(line: &str, column: usize) -> usize {
+    line.char_indices()
+        .nth(column)
+        .map_or(line.len(), |(byte_idx, _)| byte_idx)
 }
 
 pub fn display_messages_from_history(messages: &[Message]) -> Vec<DisplayMessage> {

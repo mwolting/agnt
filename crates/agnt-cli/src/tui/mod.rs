@@ -3,8 +3,13 @@ pub mod session_dialog;
 pub mod ui;
 
 use std::io;
+use std::time::Duration;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind,
+    KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -19,13 +24,26 @@ use crate::tui::app::{App, AppState};
 /// from the panic hook.
 pub fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
 }
 
 pub async fn launch(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     // Terminal setup
     enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+        )
+    )?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
@@ -40,6 +58,69 @@ pub async fn launch(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     restore_terminal();
 
     result
+}
+fn flush_pending_scroll(app: &mut App, pending_scroll_delta: &mut i32) {
+    if *pending_scroll_delta != 0 {
+        app.scroll_by(*pending_scroll_delta);
+        *pending_scroll_delta = 0;
+    }
+}
+
+fn handle_terminal_event(app: &mut App, event: Event, pending_scroll_delta: &mut i32) {
+    match event {
+        Event::Key(key) => {
+            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+                flush_pending_scroll(app, pending_scroll_delta);
+                app.handle_key(key);
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                *pending_scroll_delta = pending_scroll_delta.saturating_add(3);
+            }
+            MouseEventKind::ScrollDown => {
+                *pending_scroll_delta = pending_scroll_delta.saturating_sub(3);
+            }
+            _ => {
+                flush_pending_scroll(app, pending_scroll_delta);
+                app.handle_mouse(mouse);
+            }
+        },
+        Event::Resize(_, _) => {
+            flush_pending_scroll(app, pending_scroll_delta);
+        }
+        _ => {
+            flush_pending_scroll(app, pending_scroll_delta);
+        }
+    }
+}
+
+async fn handle_terminal_event_and_drain(
+    app: &mut App,
+    first_event: Event,
+    events: &mut EventStream,
+) {
+    // Trackpads can emit long momentum bursts (especially on macOS).
+    // Drain already-buffered events in one pass so stale scroll events don't
+    // make the UI feel "stuck" at bounds.
+    const MAX_DRAINED_EVENTS_PER_TICK: usize = 256;
+
+    let mut pending_scroll_delta = 0;
+    handle_terminal_event(app, first_event, &mut pending_scroll_delta);
+
+    for _ in 0..MAX_DRAINED_EVENTS_PER_TICK {
+        let Ok(next) = tokio::time::timeout(Duration::from_millis(0), events.next()).await else {
+            break;
+        };
+
+        let Some(Ok(event)) = next else {
+            break;
+        };
+
+        handle_terminal_event(app, event, &mut pending_scroll_delta);
+    }
+
+    flush_pending_scroll(app, &mut pending_scroll_delta);
 }
 
 async fn run_loop(
@@ -62,16 +143,7 @@ async fn run_loop(
 
         tokio::select! {
             Some(Ok(event)) = events.next() => {
-                match event {
-                    Event::Key(key) => {
-                        app.handle_key(key);
-                    }
-                    Event::Mouse(mouse) => {
-                        app.handle_mouse(mouse);
-                    }
-                    Event::Resize(_, _) => {}
-                    _ => {}
-                }
+                handle_terminal_event_and_drain(app, event, events).await;
             }
 
             Some(agent_event) = async {
