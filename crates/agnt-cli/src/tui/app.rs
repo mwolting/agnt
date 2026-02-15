@@ -84,6 +84,7 @@ impl App {
 
     /// Handle a keyboard event. Returns true if the event was consumed.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        self.normalize_cursor_pos();
         match key.code {
             // Quit
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -152,29 +153,31 @@ impl App {
             }
             KeyCode::Backspace => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
-                    self.input.remove(self.cursor_pos);
+                    let start = prev_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(start..self.cursor_pos);
+                    self.cursor_pos = start;
                     self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
-                    self.input.remove(self.cursor_pos);
+                    let end = next_char_boundary(&self.input, self.cursor_pos);
+                    self.input.drain(self.cursor_pos..end);
                     self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Left => {
                 if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                    self.cursor_pos = prev_char_boundary(&self.input, self.cursor_pos);
                     self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
             }
             KeyCode::Right => {
                 if self.cursor_pos < self.input.len() {
-                    self.cursor_pos += 1;
+                    self.cursor_pos = next_char_boundary(&self.input, self.cursor_pos);
                     self.typeahead.sync(&self.input, self.cursor_pos);
                 }
                 true
@@ -343,6 +346,9 @@ impl App {
         }
     }
 
+    fn normalize_cursor_pos(&mut self) {
+        self.cursor_pos = clamp_to_char_boundary(&self.input, self.cursor_pos);
+    }
     fn move_cursor_to_line_start(&mut self) {
         let cursor = self.cursor_pos.min(self.input.len());
         self.cursor_pos = self.input[..cursor].rfind('\n').map_or(0, |idx| idx + 1);
@@ -403,6 +409,7 @@ impl App {
     }
 
     fn insert_char(&mut self, c: char) {
+        self.normalize_cursor_pos();
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();
     }
@@ -574,6 +581,34 @@ impl App {
         self.resume_dialog = None;
         self.typeahead.sync(&self.input, self.cursor_pos);
     }
+}
+
+fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
+    let mut idx = index.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn prev_char_boundary(text: &str, index: usize) -> usize {
+    let idx = clamp_to_char_boundary(text, index);
+    if idx == 0 {
+        return 0;
+    }
+    clamp_to_char_boundary(text, idx - 1)
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let idx = clamp_to_char_boundary(text, index);
+    if idx >= text.len() {
+        return text.len();
+    }
+
+    text[idx..]
+        .chars()
+        .next()
+        .map_or(text.len(), |ch| idx + ch.len_utf8())
 }
 
 fn byte_index_for_column(line: &str, column: usize) -> usize {

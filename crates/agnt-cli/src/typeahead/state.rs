@@ -170,7 +170,8 @@ impl TypeaheadState {
             return None;
         }
 
-        let prefix = &input[..cursor_pos.min(input.len())];
+        let cursor_pos = clamp_to_char_boundary(input, cursor_pos);
+        let prefix = &input[..cursor_pos];
         let (token_start, leader, query) = extract_query_token(prefix)?;
         let mut active = match leader {
             '/' => Some(ActiveTypeahead::Command(build_match_set(
@@ -437,7 +438,8 @@ fn stabilize_set_during_loading_delay<T: TypeaheadItem>(
 }
 
 fn current_trigger_token(input: &str, cursor_pos: usize) -> Option<TriggerToken> {
-    let prefix = &input[..cursor_pos.min(input.len())];
+    let cursor_pos = clamp_to_char_boundary(input, cursor_pos);
+    let prefix = &input[..cursor_pos];
     let (token_start, leader, _) = extract_query_token(prefix)?;
     match leader {
         '/' | '@' => Some(TriggerToken {
@@ -446,6 +448,14 @@ fn current_trigger_token(input: &str, cursor_pos: usize) -> Option<TriggerToken>
         }),
         _ => None,
     }
+}
+
+fn clamp_to_char_boundary(text: &str, index: usize) -> usize {
+    let mut idx = index.min(text.len());
+    while idx > 0 && !text.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
 }
 
 fn selected_is_visible(count: usize, window_start: usize, selected_index: usize) -> bool {

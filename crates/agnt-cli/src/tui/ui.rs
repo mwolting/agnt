@@ -775,7 +775,11 @@ fn calculate_input_height(app: &App, width: u16) -> u16 {
 
 fn cursor_position(input: &str, byte_pos: usize, width: usize) -> (usize, usize) {
     let width = width.max(1);
-    let before_cursor = &input[..byte_pos.min(input.len())];
+    let mut byte_pos = byte_pos.min(input.len());
+    while byte_pos > 0 && !input.is_char_boundary(byte_pos) {
+        byte_pos -= 1;
+    }
+    let before_cursor = &input[..byte_pos];
     let mut row = 0;
     let mut col = 0;
 
