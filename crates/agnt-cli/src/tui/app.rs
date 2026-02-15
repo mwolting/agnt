@@ -242,6 +242,22 @@ impl App {
         }
     }
 
+    pub fn handle_paste(&mut self, text: &str) {
+        if self.resume_dialog.is_some() || text.is_empty() {
+            return;
+        }
+
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if normalized.is_empty() {
+            return;
+        }
+
+        self.normalize_cursor_pos();
+        self.input.insert_str(self.cursor_pos, &normalized);
+        self.cursor_pos += normalized.len();
+        self.typeahead.sync(&self.input, self.cursor_pos);
+    }
+
     /// Handle an agent event.
     pub fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {

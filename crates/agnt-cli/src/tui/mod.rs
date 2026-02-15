@@ -6,7 +6,8 @@ use std::io;
 use std::time::Duration;
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyEventKind,
     KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
     PushKeyboardEnhancementFlags,
 };
@@ -28,6 +29,7 @@ pub fn restore_terminal() {
         io::stdout(),
         PopKeyboardEnhancementFlags,
         DisableMouseCapture,
+        DisableBracketedPaste,
         LeaveAlternateScreen
     );
 }
@@ -39,6 +41,7 @@ pub async fn launch(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         io::stdout(),
         EnterAlternateScreen,
         EnableMouseCapture,
+        EnableBracketedPaste,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
@@ -73,6 +76,10 @@ fn handle_terminal_event(app: &mut App, event: Event, pending_scroll_delta: &mut
                 flush_pending_scroll(app, pending_scroll_delta);
                 app.handle_key(key);
             }
+        }
+        Event::Paste(text) => {
+            flush_pending_scroll(app, pending_scroll_delta);
+            app.handle_paste(&text);
         }
         Event::Mouse(mouse) => match mouse.kind {
             MouseEventKind::ScrollUp => {
